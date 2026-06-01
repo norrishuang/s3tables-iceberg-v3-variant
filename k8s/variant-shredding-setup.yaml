@@ -1,38 +1,56 @@
 ---
-# Step 1: 建表 + 数据生成
-# 用法: kubectl apply -f variant-shredding-setup.yaml -n emr-eks-spark
+# Step 1: 建表 + 数据生成（Java）
+# 用法:
+#   kubectl delete sparkapplication.sparkoperator.k8s.io variant-shredding-setup -n emr-eks-spark --ignore-not-found
+#   kubectl apply -f variant-shredding-setup.yaml -n emr-eks-spark
 apiVersion: "sparkoperator.k8s.io/v1beta2"
 kind: SparkApplication
 metadata:
   name: variant-shredding-setup
   namespace: emr-eks-spark
 spec:
-  type: Python
+  type: Java
   mode: cluster
   image: 812046859005.dkr.ecr.us-east-1.amazonaws.com/oss-spark:4.1.2-iceberg1.11-s3t
   imagePullPolicy: Always
-  mainApplicationFile: s3://adap-prototype-812046859005/variant-shredding-test/scripts/setup_variant_shredding_tables.py
+  mainApplicationFile: s3a://adap-prototype-812046859005/variant-shredding-test/jars/shredding-etl-1.0.0-shaded.jar
+  mainClass: com.example.SetupTables
   sparkVersion: "4.1.2"
   restartPolicy:
     type: Never
 
   hadoopConf:
-    # S3A 文件系统
+    fs.s3.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
     fs.s3a.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
-    fs.s3a.aws.credentials.provider: com.amazonaws.auth.WebIdentityTokenCredentialsProvider
     fs.s3a.endpoint.region: us-east-1
     fs.s3a.path.style.access: "false"
+    fs.AbstractFileSystem.s3.impl: org.apache.hadoop.fs.s3a.S3A
 
   sparkConf:
-    # ── Iceberg + S3 Tables ──
+    # ── 清除 EMR Operator 注入 ──
+    spark.driver.extraClassPath: ""
+    spark.executor.extraClassPath: ""
+    spark.executor.extraLibraryPath: ""
+    spark.driver.extraLibraryPath: ""
+    spark.sql.emr.internal.extensions: ""
+    spark.sql.parquet.output.committer.class: "org.apache.spark.sql.execution.datasources.parquet.ParquetOutputCommitter"
+    spark.hadoop.mapreduce.output.fs.optimized.committer.enabled: "false"
+    spark.sql.parquet.fs.optimized.committer.optimization-enabled: "false"
+    spark.executor.defaultJavaOptions: "-XX:OnOutOfMemoryError='kill -9 %p'"
+    spark.driver.defaultJavaOptions: "-XX:OnOutOfMemoryError='kill -9 %p'"
+
+    # ── Iceberg + S3 Tables REST Catalog ──
     spark.sql.extensions: "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
     spark.sql.catalog.s3tablesbucket: "org.apache.iceberg.spark.SparkCatalog"
-    spark.sql.catalog.s3tablesbucket.catalog-impl: "software.amazon.s3tables.iceberg.S3TablesCatalog"
+    spark.sql.catalog.s3tablesbucket.catalog-impl: "org.apache.iceberg.rest.RESTCatalog"
+    spark.sql.catalog.s3tablesbucket.uri: "https://s3tables.us-east-1.amazonaws.com/iceberg"
+    spark.sql.catalog.s3tablesbucket.rest.auth.type: "sigv4"
+    spark.sql.catalog.s3tablesbucket.rest.signing-name: "s3tables"
+    spark.sql.catalog.s3tablesbucket.rest.signing-region: "us-east-1"
     spark.sql.catalog.s3tablesbucket.warehouse: "arn:aws:s3tables:us-east-1:812046859005:bucket/demo-tb-bucket-812046859005"
-    spark.sql.catalog.s3tablesbucket.client.region: "us-east-1"
     spark.sql.defaultCatalog: "s3tablesbucket"
 
-    # ── VARIANT Shredding（Spark 4.1 新特性）──
+    # ── VARIANT Shredding ──
     spark.sql.parquet.variantShreddingEnabled: "true"
 
     # ── 性能 ──
@@ -42,10 +60,14 @@ spec:
 
     # ── 事件日志 ──
     spark.eventLog.enabled: "true"
-    spark.eventLog.dir: "s3://adap-prototype-812046859005/spark-history-logs/"
+    spark.eventLog.dir: "s3a://adap-prototype-812046859005/spark-history-logs/"
 
     # ── EKS 节点选择 ──
     "spark.kubernetes.node.selector.workload-type": "spark-benchmark"
+
+  volumes:
+  - name: empty-spark-conf
+    emptyDir: {}
 
   driver:
     cores: 4
@@ -53,6 +75,9 @@ spec:
     memory: "8g"
     memoryOverhead: "2048"
     serviceAccount: emr-job-execution-sa
+    volumeMounts:
+    - name: empty-spark-conf
+      mountPath: /usr/lib/spark/conf
 
   executor:
     cores: 4
@@ -61,3 +86,6 @@ spec:
     memoryOverhead: "2048"
     instances: 10
     serviceAccount: emr-job-execution-sa
+    volumeMounts:
+    - name: empty-spark-conf
+      mountPath: /usr/lib/spark/conf

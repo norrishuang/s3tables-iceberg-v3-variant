@@ -1,77 +1,134 @@
 package com.example;
 
 import org.apache.spark.sql.*;
+import org.apache.spark.storage.StorageLevel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.LocalDate;
 import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * ETL：game_action_logs → 2 张 Shredding 对比表
- *   1. game_action_logs_variant_shredded     — VARIANT + hours(tm)，无 bucket
- *   2. game_action_logs_bkt_variant_shredded — VARIANT + hours(tm) + bucket(64,aid)
+ * ETL：game_action_logs → 2 张 Variant Shredding 对比表
+ *   1. variant_test_no_partition     — VARIANT + hours(tm)，无 bucket
+ *   2. variant_test_with_bucket      — VARIANT + hours(tm) + bucket(64,aid)
  *
- * 所有 Catalog/Iceberg 配置通过外部 sparkConf（SparkApplication YAML 的 sparkConf 段）传入，
- * 代码内不硬编码任何 catalog 参数，保持与 PySpark 版完全等价的业务逻辑。
- * 支持断点续跑：已写入两张目标表的日期会被跳过。
+ * 源表: srccat.gamedb.game_action_logs（iceberg-data-812046859005，~40亿行）
+ * 目标: dstcat.iceberg_v3_test.variant_test_no_partition
+ *       dstcat.iceberg_v3_test.variant_test_with_bucket
+ *
+ * 字段映射: log_id→event_id, aid→aid, tm→tm, parse_json(detail)→detail
+ * 按天分批处理，cache 后写两张表，支持断点续跑。
+ *
+ * Catalog 配置通过 sparkConf（SparkApplication YAML）传入：
+ *   srccat = REST Catalog → iceberg-data-812046859005
+ *   dstcat = REST Catalog → demo-tb-bucket-812046859005
  */
 public class ShredingEtl {
 
     private static final Logger log = LoggerFactory.getLogger(ShredingEtl.class);
 
-    static final String CATALOG   = "s3tablesbucket";
-    static final String NAMESPACE = "gamedb";
-    static final String SRC_TABLE = "game_action_logs";
-    static final String DST1      = "game_action_logs_variant";
-    static final String DST2      = "game_action_logs_bucket_variant";
+    // 双 Catalog：源和目标分别配置
+    private static final String SRC_TABLE = "srccat.gamedb.game_action_logs";
+    private static final String DST_NO_PART = "dstcat.iceberg_v3_test.variant_test_no_partition";
+    private static final String DST_WITH_BKT = "dstcat.iceberg_v3_test.variant_test_with_bucket";
 
-    public static void main(String[] args) throws Exception {
+    // 硬编码日期范围（通过 Athena 确认：2026-04-28 ~ 2026-05-29，共 32 天）
+    // 源表有 746 个 snapshot，Iceberg metadata scan 极慢，避免全表扫描获取日期
+    private static final LocalDate START_DATE = LocalDate.of(2026, 4, 28);
+    private static final LocalDate END_DATE = LocalDate.of(2026, 5, 29);
+
+    // 每天数据写入时的 repartition 数量（避免分区过少导致文件过大）
+    private static final int REPARTITION_COUNT = 200;
+
+    public static void main(String[] args) {
         SparkSession spark = SparkSession.builder()
-                .appName("ETL-Shredding-From-Source")
+                .appName("ETL-Variant-Shredding-FullLoad")
                 .getOrCreate();
 
-        // 降低 Spark 内部日志噪音
         spark.sparkContext().setLogLevel("WARN");
         log.info("Spark 版本: {}", spark.version());
 
-        // 获取源表所有日期（升序）
-        List<String> allDates = getAllDates(spark);
-        log.info("源表共 {} 天: {} ~ {}",
-                allDates.size(), allDates.get(0), allDates.get(allDates.size() - 1));
+        // 确保目标表存在
+        createTablesIfNotExist(spark);
+
+        List<LocalDate> allDates = getAllDates();
+        log.info("源表共 {} 天: {} ~ {}", allDates.size(), allDates.get(0), allDates.get(allDates.size() - 1));
 
         // 断点续跑：两张目标表都写完的日期才算"已完成"
-        Set<String> done1 = getWrittenDates(spark, DST1);
-        Set<String> done2 = getWrittenDates(spark, DST2);
-        Set<String> done  = new HashSet<>(done1);
+        Set<String> done1 = getWrittenDates(spark, DST_NO_PART);
+        Set<String> done2 = getWrittenDates(spark, DST_WITH_BKT);
+        Set<String> done = new HashSet<>(done1);
         done.retainAll(done2);
 
-        List<String> pending = allDates.stream()
-                .filter(d -> !done.contains(d))
+        List<LocalDate> pending = allDates.stream()
+                .filter(d -> !done.contains(d.toString()))
                 .collect(Collectors.toList());
         log.info("总天数={}, 已完成={}, 待处理={}", allDates.size(), done.size(), pending.size());
 
-        for (String dt : pending) {
-            log.info("开始处理 {} ...", dt);
-            processDay(spark, dt);
+        for (int i = 0; i < pending.size(); i++) {
+            LocalDate dt = pending.get(i);
+            log.info("进度: {}/{} — 开始处理 {} ...", i + 1, pending.size(), dt);
+            processDay(spark, dt.toString());
             log.info("{} 处理完成", dt);
+        }
+
+        // 最终行数验证
+        for (String tbl : List.of(DST_NO_PART, DST_WITH_BKT)) {
+            long total = spark.read().table(tbl).count();
+            log.info("最终行数 {}: {}", tbl, String.format("%,d", total));
         }
 
         spark.stop();
         log.info("全部处理完成");
     }
 
+    /**
+     * 确保目标 namespace 和表存在
+     */
+    static void createTablesIfNotExist(SparkSession spark) {
+        log.info("确保目标 namespace 和表存在...");
+        spark.sql("CREATE NAMESPACE IF NOT EXISTS dstcat.iceberg_v3_test");
+
+        spark.sql("CREATE TABLE IF NOT EXISTS " + DST_NO_PART + " (\n" +
+                "    event_id BIGINT,\n" +
+                "    aid      BIGINT,\n" +
+                "    tm       TIMESTAMP,\n" +
+                "    detail   VARIANT\n" +
+                ") USING iceberg\n" +
+                "PARTITIONED BY (hours(tm))\n" +
+                "TBLPROPERTIES (\n" +
+                "    'format-version' = '3',\n" +
+                "    'write.parquet.compression-codec' = 'zstd'\n" +
+                ")");
+        log.info("表 {} 已就绪", DST_NO_PART);
+
+        spark.sql("CREATE TABLE IF NOT EXISTS " + DST_WITH_BKT + " (\n" +
+                "    event_id BIGINT,\n" +
+                "    aid      BIGINT,\n" +
+                "    tm       TIMESTAMP,\n" +
+                "    detail   VARIANT\n" +
+                ") USING iceberg\n" +
+                "PARTITIONED BY (hours(tm), bucket(64, aid))\n" +
+                "TBLPROPERTIES (\n" +
+                "    'format-version' = '3',\n" +
+                "    'write.parquet.compression-codec' = 'zstd'\n" +
+                ")");
+        log.info("表 {} 已就绪", DST_WITH_BKT);
+    }
 
     /**
-     * 获取源表所有日期（升序，返回 yyyy-MM-dd 字符串列表）
+     * 硬编码日期列表（避免对 40 亿行源表做 DISTINCT 全表扫描）
      */
-    static List<String> getAllDates(SparkSession spark) {
-        String src = fqn(SRC_TABLE);
-        return spark.sql(
-                "SELECT DISTINCT DATE(tm) AS dt FROM " + src + " ORDER BY dt"
-        ).collectAsList().stream()
-                .map(r -> r.getDate(0).toString())   // java.sql.Date.toString() = "yyyy-MM-dd"
-                .collect(Collectors.toList());
+    static List<LocalDate> getAllDates() {
+        List<LocalDate> dates = new ArrayList<>();
+        LocalDate d = START_DATE;
+        while (!d.isAfter(END_DATE)) {
+            dates.add(d);
+            d = d.plusDays(1);
+        }
+        return dates;
     }
 
     /**
@@ -80,52 +137,49 @@ public class ShredingEtl {
     static Set<String> getWrittenDates(SparkSession spark, String table) {
         try {
             return spark.sql(
-                    "SELECT DISTINCT DATE(tm) AS dt FROM " + fqn(table) + " ORDER BY dt"
+                    "SELECT DISTINCT DATE(tm) AS dt FROM " + table + " ORDER BY dt"
             ).collectAsList().stream()
                     .map(r -> r.getDate(0).toString())
                     .collect(Collectors.toSet());
         } catch (Exception e) {
-            log.warn("读取目标表日期失败，视为空表（原因：{}）", e.getMessage());
+            log.warn("读取目标表日期失败，视为空表: {} ({})", table, e.getMessage());
             return Collections.emptySet();
         }
     }
 
     /**
-     * 处理单天数据：从源表读 → 写入两张目标表
+     * 处理单天数据：从源表读 → cache → 写入两张目标表
      */
     static void processDay(SparkSession spark, String dt) {
-        String src = fqn(SRC_TABLE);
-        String t1  = fqn(DST1);
-        String t2  = fqn(DST2);
-
         // parse_json(detail) 将 STRING 转成 VARIANT 类型
         Dataset<Row> df = spark.sql(
-            "SELECT\n" +
-            "    aid, event, uin, roomid, lv, mode, version, area, tm, log_id,\n" +
-            "    parse_json(detail) AS detail\n" +
-            "FROM " + src + "\n" +
-            "WHERE DATE(tm) = DATE('" + dt + "')"
+                "SELECT " +
+                "    log_id AS event_id, aid, tm, parse_json(detail) AS detail " +
+                "FROM " + SRC_TABLE + " " +
+                "WHERE DATE(tm) = DATE('" + dt + "')"
         );
 
-        // 缓存，避免写两张表时触发两次全量 S3 扫描
-        df.cache();
+        // 使用 MEMORY_AND_DISK 避免内存不足时 OOM
+        df.persist(StorageLevel.MEMORY_AND_DISK());
         long cnt = df.count();
-        log.info("  {} 共 {} 行", dt, cnt);
+        log.info("  {} 共 {} 行", dt, String.format("%,d", cnt));
 
         try {
-            df.writeTo(t1).append();
-            df.writeTo(t2).append();
-        } catch (org.apache.spark.sql.catalyst.analysis.NoSuchTableException e) {
-            throw new RuntimeException("目标表不存在，请先执行 createTables: " + e.getMessage(), e);
+            // 写入表1：hours(tm) 分区，指定 repartition 数量避免文件过大
+            df.repartition(REPARTITION_COUNT, functions.hour(functions.col("tm")))
+                    .writeTo(DST_NO_PART)
+                    .append();
+            log.info("  {} → {} 写入完成", dt, DST_NO_PART);
+
+            // 写入表2：hours(tm) + bucket(64, aid) 分区
+            df.repartition(REPARTITION_COUNT, functions.hour(functions.col("tm")), functions.col("aid").mod(64))
+                    .writeTo(DST_WITH_BKT)
+                    .append();
+            log.info("  {} → {} 写入完成", dt, DST_WITH_BKT);
+        } catch (Exception e) {
+            throw new RuntimeException("写入失败 " + dt + ": " + e.getMessage(), e);
         }
 
         df.unpersist();
-    }
-
-    /**
-     * 拼接三段限定名 catalog.namespace.table
-     */
-    static String fqn(String table) {
-        return CATALOG + "." + NAMESPACE + "." + table;
     }
 }
