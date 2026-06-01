@@ -1,0 +1,119 @@
+---
+# ETL: game_action_logs → 2 张 Shredding 对比表
+# 源表来自 iceberg-data-812046859005/gamedb，全量真实数据（40 亿行）
+# 目标表写入同一 bucket（iceberg-data-812046859005）gamedb namespace
+# 用法: kubectl delete sparkapplication.sparkoperator.k8s.io variant-shredding-etl -n emr-eks-spark --ignore-not-found
+#       kubectl apply -f variant-shredding-etl.yaml -n emr-eks-spark
+apiVersion: "sparkoperator.k8s.io/v1beta2"
+kind: SparkApplication
+metadata:
+  name: variant-shredding-etl
+  namespace: emr-eks-spark
+spec:
+  type: Python
+  mode: cluster
+  image: 812046859005.dkr.ecr.us-east-1.amazonaws.com/oss-spark:4.1.2-iceberg1.11-s3t
+  imagePullPolicy: Always
+  mainApplicationFile: s3a://adap-prototype-812046859005/variant-shredding-test/scripts/etl_shredding_from_source.py
+  sparkVersion: "4.1.2"
+  restartPolicy:
+    type: Never
+
+  hadoopConf:
+    # 强制使用 S3A，不指定 credential provider（让 Hadoop DefaultChain 自动处理 IRSA/WebIdentity）
+    fs.s3.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+    fs.s3a.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+    fs.s3a.endpoint.region: us-east-1
+    fs.s3a.path.style.access: "false"
+    # 覆盖 EMR operator 注入的 EMRFS 代理类（开源容器里不存在）
+    fs.AbstractFileSystem.s3.impl: org.apache.hadoop.fs.s3a.S3A
+
+  sparkConf:
+    # ══════════════════════════════════════════════════════════
+    # 【关键】清除 EMR Operator 注入的所有有害配置
+    # 这个集群的 spark-operator 是 Amazon EMR 定制版，会向 spark.properties 注入：
+    # 1. extraClassPath（几十个 EMR 路径，在开源容器里不存在）
+    # 2. EMR 专属扩展类（SparkSession 初始化时会 ClassNotFoundException）
+    # 3. EMR 文件系统代理（使用 EMRFS 而不是 S3A）
+    # 下面的配置用空值/标准值覆盖这些注入
+    # ══════════════════════════════════════════════════════════
+
+    # 1. 清空 extraClassPath（最核心：JVM classloader 扫描几十个不存在路径会超时 30+ 分钟）
+    spark.driver.extraClassPath: ""
+    spark.executor.extraClassPath: ""
+    spark.executor.extraLibraryPath: ""
+    spark.driver.extraLibraryPath: ""
+
+    # 2. 清掉 EMR 专属 Spark Extensions（com.amazonaws.emr.spark.EmrSparkSessionExtensions 在开源容器不存在）
+    spark.sql.emr.internal.extensions: ""
+
+    # 3. 覆盖 EMR 定制的 Parquet committer，使用标准 Spark committer
+    spark.sql.parquet.output.committer.class: "org.apache.spark.sql.execution.datasources.parquet.ParquetOutputCommitter"
+    spark.hadoop.mapreduce.output.fs.optimized.committer.enabled: "false"
+    spark.sql.parquet.fs.optimized.committer.optimization-enabled: "false"
+
+    # 4. 清掉 EMR executor defaultJavaOptions（EMR 注入 -verbose:gc 等 GC 日志配置，不影响正确性但产生噪声）
+    spark.executor.defaultJavaOptions: "-XX:OnOutOfMemoryError='kill -9 %p'"
+    spark.driver.defaultJavaOptions: "-XX:OnOutOfMemoryError='kill -9 %p'"
+
+    # ── Iceberg + S3 Tables REST Catalog ──
+    # 不再使用 s3-tables-catalog jar（内置 Iceberg 1.6.1，与镜像 1.11.0 冲突）
+    # 改用标准 Iceberg RESTCatalog + SigV4 签名直连 S3 Tables 服务端点
+    # SigV4 配置：Iceberg 1.11.0 正确方式是 rest.auth.type=sigv4
+    # （rest.sigv4-enabled 是 legacy key，也支持但建议用新 key）
+    spark.sql.extensions: "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+    spark.sql.catalog.s3tablesbucket: "org.apache.iceberg.spark.SparkCatalog"
+    spark.sql.catalog.s3tablesbucket.catalog-impl: "org.apache.iceberg.rest.RESTCatalog"
+    spark.sql.catalog.s3tablesbucket.uri: "https://s3tables.us-east-1.amazonaws.com/iceberg"
+    spark.sql.catalog.s3tablesbucket.rest.auth.type: "sigv4"
+    spark.sql.catalog.s3tablesbucket.rest.signing-name: "s3tables"
+    spark.sql.catalog.s3tablesbucket.rest.signing-region: "us-east-1"
+    spark.sql.catalog.s3tablesbucket.warehouse: "arn:aws:s3tables:us-east-1:812046859005:bucket/iceberg-data-812046859005"
+    spark.sql.defaultCatalog: "s3tablesbucket"
+
+    # ── VARIANT Shredding（Spark 4.1 新特性，写入时生效）──
+    spark.sql.parquet.variantShreddingEnabled: "true"
+
+    # ── 性能 ──
+    spark.sql.adaptive.enabled: "true"
+    spark.sql.adaptive.coalescePartitions.enabled: "true"
+    spark.sql.shuffle.partitions: "400"
+    # 缓存 + 写两张表时减少 OOM
+    spark.memory.fraction: "0.7"
+    spark.memory.storageFraction: "0.4"
+
+    # ── 事件日志（用 s3a://）──
+    spark.eventLog.enabled: "true"
+    spark.eventLog.dir: "s3a://adap-prototype-812046859005/spark-history-logs/"
+
+    # ── EKS 节点选择：只指定 workload-type（避免节点没有其他 label 导致 Pending）──
+    "spark.kubernetes.node.selector.workload-type": "spark-benchmark"
+
+  # volumes 在 spec 顶层定义，driver/executor 只引用 volumeMounts
+  volumes:
+  - name: empty-spark-conf
+    emptyDir: {}
+
+  driver:
+    cores: 4
+    coreLimit: "4.1"
+    memory: "16g"
+    memoryOverhead: "4096"
+    serviceAccount: spark-oss-sa
+    # 用 emptyDir 覆盖 EMR Operator 注入的 /usr/lib/spark/conf ConfigMap 挂载
+    # 注意：EMR operator 将 spark.properties 挂载到此路径，清空后 entrypoint-wrapper.sh
+    # 也不会找到 spark.properties，从而完全绕过注入
+    volumeMounts:
+    - name: empty-spark-conf
+      mountPath: /usr/lib/spark/conf
+
+  executor:
+    cores: 4
+    coreLimit: "4.2"
+    memory: "16g"
+    memoryOverhead: "4096"
+    instances: 20
+    serviceAccount: spark-oss-sa
+    volumeMounts:
+    - name: empty-spark-conf
+      mountPath: /usr/lib/spark/conf

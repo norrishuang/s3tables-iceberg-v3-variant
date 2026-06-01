@@ -1,0 +1,19 @@
+# Java 编译产物
+etl/java/target/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# 大型 JAR（不入库，通过构建或 S3 获取）
+*.jar
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store

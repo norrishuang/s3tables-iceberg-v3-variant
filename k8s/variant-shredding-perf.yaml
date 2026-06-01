@@ -1,0 +1,62 @@
+---
+# Step 2: 性能测试（建表完成后执行）
+# 用法: kubectl apply -f variant-shredding-perf.yaml -n emr-eks-spark
+apiVersion: "sparkoperator.k8s.io/v1beta2"
+kind: SparkApplication
+metadata:
+  name: variant-shredding-perf
+  namespace: emr-eks-spark
+spec:
+  type: Python
+  mode: cluster
+  image: 812046859005.dkr.ecr.us-east-1.amazonaws.com/oss-spark:4.1.2-iceberg1.11-s3t
+  imagePullPolicy: Always
+  mainApplicationFile: s3://adap-prototype-812046859005/variant-shredding-test/scripts/perf_test_variant_shredding.py
+  sparkVersion: "4.1.2"
+  restartPolicy:
+    type: Never
+
+  hadoopConf:
+    fs.s3a.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+    fs.s3a.aws.credentials.provider: com.amazonaws.auth.WebIdentityTokenCredentialsProvider
+    fs.s3a.endpoint.region: us-east-1
+    fs.s3a.path.style.access: "false"
+
+  sparkConf:
+    # ── Iceberg + S3 Tables ──
+    spark.sql.extensions: "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+    spark.sql.catalog.s3tablesbucket: "org.apache.iceberg.spark.SparkCatalog"
+    spark.sql.catalog.s3tablesbucket.catalog-impl: "software.amazon.s3tables.iceberg.S3TablesCatalog"
+    spark.sql.catalog.s3tablesbucket.warehouse: "arn:aws:s3tables:us-east-1:812046859005:bucket/demo-tb-bucket-812046859005"
+    spark.sql.catalog.s3tablesbucket.client.region: "us-east-1"
+    spark.sql.defaultCatalog: "s3tablesbucket"
+
+    # ── VARIANT Shredding（Spark 4.1 新特性）──
+    spark.sql.parquet.variantShreddingEnabled: "true"
+
+    # ── 性能 ──
+    spark.sql.adaptive.enabled: "true"
+    spark.sql.adaptive.coalescePartitions.enabled: "true"
+    spark.sql.shuffle.partitions: "200"
+
+    # ── 事件日志 ──
+    spark.eventLog.enabled: "true"
+    spark.eventLog.dir: "s3://adap-prototype-812046859005/spark-history-logs/"
+
+    # ── EKS 节点选择 ──
+    "spark.kubernetes.node.selector.workload-type": "spark-benchmark"
+
+  driver:
+    cores: 4
+    coreLimit: "4.1"
+    memory: "8g"
+    memoryOverhead: "2048"
+    serviceAccount: emr-job-execution-sa
+
+  executor:
+    cores: 4
+    coreLimit: "4.2"
+    memory: "12g"
+    memoryOverhead: "2048"
+    instances: 10
+    serviceAccount: emr-job-execution-sa

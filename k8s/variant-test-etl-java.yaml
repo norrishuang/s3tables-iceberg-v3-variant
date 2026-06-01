@@ -1,0 +1,103 @@
+---
+# ETL: game_action_logs（iceberg-data bucket） → variant_test_* 两张表（demo-tb-bucket）
+# 全量真实数据（~40亿行），按天分批，cache 后写两张目标表
+# 
+# 用法:
+#   kubectl delete sparkapplication.sparkoperator.k8s.io variant-test-etl -n emr-eks-spark --ignore-not-found
+#   kubectl apply -f variant-test-etl.yaml -n emr-eks-spark
+apiVersion: "sparkoperator.k8s.io/v1beta2"
+kind: SparkApplication
+metadata:
+  name: variant-test-etl
+  namespace: emr-eks-spark
+spec:
+  type: Python
+  mode: cluster
+  image: 812046859005.dkr.ecr.us-east-1.amazonaws.com/oss-spark:4.1.2-iceberg1.11-s3t
+  imagePullPolicy: Always
+  mainApplicationFile: s3a://adap-prototype-812046859005/variant-shredding-test/scripts/etl_variant_test_fullload.py
+  sparkVersion: "4.1.2"
+  restartPolicy:
+    type: Never
+
+  hadoopConf:
+    fs.s3.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+    fs.s3a.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+    fs.s3a.endpoint.region: us-east-1
+    fs.s3a.path.style.access: "false"
+    fs.AbstractFileSystem.s3.impl: org.apache.hadoop.fs.s3a.S3A
+
+  sparkConf:
+    # ── 清除 EMR Operator 注入的有害配置 ──
+    spark.driver.extraClassPath: ""
+    spark.executor.extraClassPath: ""
+    spark.executor.extraLibraryPath: ""
+    spark.driver.extraLibraryPath: ""
+    spark.sql.emr.internal.extensions: ""
+    spark.sql.parquet.output.committer.class: "org.apache.spark.sql.execution.datasources.parquet.ParquetOutputCommitter"
+    spark.hadoop.mapreduce.output.fs.optimized.committer.enabled: "false"
+    spark.sql.parquet.fs.optimized.committer.optimization-enabled: "false"
+    spark.executor.defaultJavaOptions: "-XX:OnOutOfMemoryError='kill -9 %p'"
+    spark.driver.defaultJavaOptions: "-XX:OnOutOfMemoryError='kill -9 %p'"
+
+    spark.sql.extensions: "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+
+    # ── srccat: 读取源数据（iceberg-data-812046859005 / gamedb）──
+    spark.sql.catalog.srccat: "org.apache.iceberg.spark.SparkCatalog"
+    spark.sql.catalog.srccat.catalog-impl: "org.apache.iceberg.rest.RESTCatalog"
+    spark.sql.catalog.srccat.uri: "https://s3tables.us-east-1.amazonaws.com/iceberg"
+    spark.sql.catalog.srccat.rest.auth.type: "sigv4"
+    spark.sql.catalog.srccat.rest.signing-name: "s3tables"
+    spark.sql.catalog.srccat.rest.signing-region: "us-east-1"
+    spark.sql.catalog.srccat.warehouse: "arn:aws:s3tables:us-east-1:812046859005:bucket/iceberg-data-812046859005"
+
+    # ── dstcat: 写入目标表（demo-tb-bucket-812046859005 / iceberg_v3_test）──
+    spark.sql.catalog.dstcat: "org.apache.iceberg.spark.SparkCatalog"
+    spark.sql.catalog.dstcat.catalog-impl: "org.apache.iceberg.rest.RESTCatalog"
+    spark.sql.catalog.dstcat.uri: "https://s3tables.us-east-1.amazonaws.com/iceberg"
+    spark.sql.catalog.dstcat.rest.auth.type: "sigv4"
+    spark.sql.catalog.dstcat.rest.signing-name: "s3tables"
+    spark.sql.catalog.dstcat.rest.signing-region: "us-east-1"
+    spark.sql.catalog.dstcat.warehouse: "arn:aws:s3tables:us-east-1:812046859005:bucket/demo-tb-bucket-812046859005"
+
+    # ── VARIANT Shredding（写入时生效）──
+    spark.sql.parquet.variantShreddingEnabled: "true"
+
+    # ── 性能 ──
+    spark.sql.adaptive.enabled: "true"
+    spark.sql.adaptive.coalescePartitions.enabled: "true"
+    spark.sql.shuffle.partitions: "400"
+    spark.memory.fraction: "0.7"
+    spark.memory.storageFraction: "0.4"
+
+    # ── 事件日志 ──
+    spark.eventLog.enabled: "true"
+    spark.eventLog.dir: "s3a://adap-prototype-812046859005/spark-history-logs/"
+
+    # ── EKS 节点选择 ──
+    "spark.kubernetes.node.selector.workload-type": "spark-benchmark"
+
+  volumes:
+  - name: empty-spark-conf
+    emptyDir: {}
+
+  driver:
+    cores: 4
+    coreLimit: "4.1"
+    memory: "16g"
+    memoryOverhead: "4096"
+    serviceAccount: spark-oss-sa
+    volumeMounts:
+    - name: empty-spark-conf
+      mountPath: /usr/lib/spark/conf
+
+  executor:
+    cores: 4
+    coreLimit: "4.2"
+    memory: "16g"
+    memoryOverhead: "4096"
+    instances: 20
+    serviceAccount: spark-oss-sa
+    volumeMounts:
+    - name: empty-spark-conf
+      mountPath: /usr/lib/spark/conf
