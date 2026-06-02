@@ -1,0 +1,90 @@
+---
+# 最小化建表测试 — 验证 S3 Tables 上创建 VARIANT 列是否成功
+# 用法:
+#   kubectl delete sparkapplication.sparkoperator.k8s.io variant-create-test -n emr-eks-spark --ignore-not-found
+#   kubectl apply -f variant-create-test.yaml -n emr-eks-spark
+#   kubectl logs -f variant-create-test-driver -n emr-eks-spark
+apiVersion: "sparkoperator.k8s.io/v1beta2"
+kind: SparkApplication
+metadata:
+  name: variant-create-test
+  namespace: emr-eks-spark
+spec:
+  type: Java
+  mode: cluster
+  image: 812046859005.dkr.ecr.us-east-1.amazonaws.com/oss-spark:4.1.2-iceberg1.11-s3t
+  imagePullPolicy: Always
+  mainApplicationFile: s3a://adap-prototype-812046859005/variant-shredding-test/jars/shredding-etl-1.0.0-shaded.jar
+  mainClass: com.example.CreateVariantTableTest
+  sparkVersion: "4.1.2"
+  restartPolicy:
+    type: Never
+
+  hadoopConf:
+    fs.s3.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+    fs.s3a.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+    fs.s3a.endpoint.region: us-east-1
+    fs.s3a.path.style.access: "false"
+    fs.AbstractFileSystem.s3.impl: org.apache.hadoop.fs.s3a.S3A
+
+  sparkConf:
+    # ── 清除 EMR Operator 注入 ──
+    spark.driver.extraClassPath: ""
+    spark.executor.extraClassPath: ""
+    spark.executor.extraLibraryPath: ""
+    spark.driver.extraLibraryPath: ""
+    spark.sql.emr.internal.extensions: ""
+    spark.sql.parquet.output.committer.class: ""
+    spark.hadoop.mapreduce.output.fs.optimized.committer.enabled: "false"
+    spark.sql.parquet.fs.optimized.committer.optimization-enabled: "false"
+    spark.executor.defaultJavaOptions: "-XX:OnOutOfMemoryError='kill -9 %p'"
+    spark.driver.defaultJavaOptions: "-XX:OnOutOfMemoryError='kill -9 %p'"
+
+    # ── Iceberg + S3 Tables REST Catalog ──
+    spark.sql.extensions: "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+    spark.sql.catalog.s3tablesbucket: "org.apache.iceberg.spark.SparkCatalog"
+    spark.sql.catalog.s3tablesbucket.catalog-impl: "org.apache.iceberg.rest.RESTCatalog"
+    spark.sql.catalog.s3tablesbucket.uri: "https://s3tables.us-east-1.amazonaws.com/iceberg"
+    spark.sql.catalog.s3tablesbucket.rest.auth.type: "sigv4"
+    spark.sql.catalog.s3tablesbucket.rest.signing-name: "s3tables"
+    spark.sql.catalog.s3tablesbucket.rest.signing-region: "us-east-1"
+    spark.sql.catalog.s3tablesbucket.warehouse: "arn:aws:s3tables:us-east-1:812046859005:bucket/demo-tb-bucket-812046859005"
+    spark.sql.defaultCatalog: "s3tablesbucket"
+
+    # ── VARIANT 支持 ──
+    spark.sql.parquet.variantShreddingEnabled: "true"
+
+    # ── 事件日志（禁用，最小化测试）──
+    spark.eventLog.enabled: "false"
+
+    # ── 性能（最小配置）──
+    spark.sql.adaptive.enabled: "true"
+    spark.sql.shuffle.partitions: "10"
+
+    # ── EKS 节点选择 ──
+    "spark.kubernetes.node.selector.workload-type": "spark-benchmark"
+
+  volumes:
+  - name: empty-spark-conf
+    emptyDir: {}
+
+  driver:
+    cores: 2
+    coreLimit: "2.1"
+    memory: "4g"
+    memoryOverhead: "1024"
+    serviceAccount: emr-job-execution-sa
+    volumeMounts:
+    - name: empty-spark-conf
+      mountPath: /usr/lib/spark/conf
+
+  executor:
+    cores: 2
+    coreLimit: "2.1"
+    memory: "4g"
+    memoryOverhead: "1024"
+    instances: 1
+    serviceAccount: emr-job-execution-sa
+    volumeMounts:
+    - name: empty-spark-conf
+      mountPath: /usr/lib/spark/conf

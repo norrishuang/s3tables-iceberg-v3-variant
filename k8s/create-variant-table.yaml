@@ -1,0 +1,52 @@
+---
+# 用 hadoop3-v21 镜像创建 Variant 表（该镜像能正确创建 V3 Variant 表）
+apiVersion: "sparkoperator.k8s.io/v1beta2"
+kind: SparkApplication
+metadata:
+  name: create-variant-table
+  namespace: emr-eks-spark
+spec:
+  type: Scala
+  mode: cluster
+  image: 812046859005.dkr.ecr.us-east-1.amazonaws.com/oss-spark:4.1.2-hadoop3-v21
+  imagePullPolicy: Always
+  mainApplicationFile: "local:///opt/spark/jars/shredding-etl-1.0.0-shaded.jar"
+  mainClass: com.example.SetupTables
+  sparkVersion: "4.1.2"
+  restartPolicy:
+    type: Never
+
+  sparkConf:
+    spark.sql.extensions: "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+    spark.sql.catalog.s3tablesbucket: "org.apache.iceberg.spark.SparkCatalog"
+    spark.sql.catalog.s3tablesbucket.type: "rest"
+    spark.sql.catalog.s3tablesbucket.uri: "https://s3tables.us-east-1.amazonaws.com/iceberg"
+    spark.sql.catalog.s3tablesbucket.rest.auth.type: "sigv4"
+    spark.sql.catalog.s3tablesbucket.rest.signing-name: "s3tables"
+    spark.sql.catalog.s3tablesbucket.rest.signing-region: "us-east-1"
+    spark.sql.catalog.s3tablesbucket.warehouse: "arn:aws:s3tables:us-east-1:812046859005:bucket/demo-tb-bucket-812046859005"
+    spark.sql.catalog.s3tablesbucket.io-impl: "org.apache.iceberg.aws.s3.S3FileIO"
+    spark.sql.catalog.s3tablesbucket.rest-metrics-reporting-enabled: "false"
+    spark.sql.parquet.variantShreddingEnabled: "true"
+    "spark.kubernetes.node.selector.workload-type": "spark-benchmark"
+
+  volumes:
+  - name: empty-spark-conf
+    emptyDir: {}
+
+  driver:
+    cores: 1
+    memory: "2g"
+    serviceAccount: emr-job-execution-sa
+    volumeMounts:
+    - name: empty-spark-conf
+      mountPath: /usr/lib/spark/conf
+
+  executor:
+    cores: 1
+    memory: "2g"
+    instances: 1
+    serviceAccount: emr-job-execution-sa
+    volumeMounts:
+    - name: empty-spark-conf
+      mountPath: /usr/lib/spark/conf

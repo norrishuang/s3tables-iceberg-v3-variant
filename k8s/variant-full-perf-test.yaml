@@ -1,0 +1,96 @@
+---
+# 性能对比测试：JSON 表 vs Variant Shredding 表（4 张表 × 10 个 aid）
+apiVersion: "sparkoperator.k8s.io/v1beta2"
+kind: SparkApplication
+metadata:
+  name: variant-full-perf-test
+  namespace: emr-eks-spark
+spec:
+  type: Java
+  mode: cluster
+  image: 812046859005.dkr.ecr.us-east-1.amazonaws.com/oss-spark:4.1.2-iceberg1.11-s3t
+  imagePullPolicy: Always
+  mainApplicationFile: s3a://adap-prototype-812046859005/variant-shredding-test/jars/shredding-etl-1.0.0-shaded.jar
+  mainClass: com.example.FullPerfTest
+  sparkVersion: "4.1.2"
+  restartPolicy:
+    type: Never
+
+  hadoopConf:
+    fs.s3.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+    fs.s3a.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+    fs.s3a.endpoint.region: us-east-1
+    fs.s3a.path.style.access: "false"
+    fs.AbstractFileSystem.s3.impl: org.apache.hadoop.fs.s3a.S3A
+
+  sparkConf:
+    # ── 清除 EMR Operator 注入 ──
+    spark.driver.extraClassPath: ""
+    spark.executor.extraClassPath: ""
+    spark.executor.extraLibraryPath: ""
+    spark.driver.extraLibraryPath: ""
+    spark.sql.emr.internal.extensions: ""
+    spark.hadoop.mapreduce.output.fs.optimized.committer.enabled: "false"
+    spark.sql.parquet.fs.optimized.committer.optimization-enabled: "false"
+    spark.executor.defaultJavaOptions: "-XX:OnOutOfMemoryError='kill -9 %p'"
+    spark.driver.defaultJavaOptions: "-XX:OnOutOfMemoryError='kill -9 %p'"
+
+    spark.sql.extensions: "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+
+    # ── srccat: JSON 源表（iceberg-data-812046859005 / gamedb）──
+    spark.sql.catalog.srccat: "org.apache.iceberg.spark.SparkCatalog"
+    spark.sql.catalog.srccat.catalog-impl: "org.apache.iceberg.rest.RESTCatalog"
+    spark.sql.catalog.srccat.uri: "https://s3tables.us-east-1.amazonaws.com/iceberg"
+    spark.sql.catalog.srccat.rest.auth.type: "sigv4"
+    spark.sql.catalog.srccat.rest.signing-name: "s3tables"
+    spark.sql.catalog.srccat.rest.signing-region: "us-east-1"
+    spark.sql.catalog.srccat.warehouse: "arn:aws:s3tables:us-east-1:812046859005:bucket/iceberg-data-812046859005"
+
+    # ── dstcat: Variant 目标表（demo-tb-bucket-812046859005 / iceberg_v3_test）──
+    spark.sql.catalog.dstcat: "org.apache.iceberg.spark.SparkCatalog"
+    spark.sql.catalog.dstcat.catalog-impl: "org.apache.iceberg.rest.RESTCatalog"
+    spark.sql.catalog.dstcat.uri: "https://s3tables.us-east-1.amazonaws.com/iceberg"
+    spark.sql.catalog.dstcat.rest.auth.type: "sigv4"
+    spark.sql.catalog.dstcat.rest.signing-name: "s3tables"
+    spark.sql.catalog.dstcat.rest.signing-region: "us-east-1"
+    spark.sql.catalog.dstcat.warehouse: "arn:aws:s3tables:us-east-1:812046859005:bucket/demo-tb-bucket-812046859005"
+
+    # ── VARIANT Shredding 读取 ──
+    spark.sql.parquet.variantShreddingEnabled: "true"
+
+    # ── 性能 ──
+    spark.sql.adaptive.enabled: "true"
+    spark.sql.adaptive.coalescePartitions.enabled: "true"
+    spark.sql.shuffle.partitions: "200"
+
+    # ── 事件日志 ──
+    spark.eventLog.enabled: "true"
+    spark.eventLog.dir: "s3a://adap-prototype-812046859005/spark-history-logs/"
+
+    # ── EKS 节点选择 ──
+    "spark.kubernetes.node.selector.workload-type": "spark-benchmark"
+
+  volumes:
+  - name: empty-spark-conf
+    emptyDir: {}
+
+  driver:
+    cores: 4
+    coreLimit: "4.1"
+    memory: "16g"
+    memoryOverhead: "4096"
+    serviceAccount: emr-job-execution-sa
+    volumeMounts:
+    - name: empty-spark-conf
+      mountPath: /usr/lib/spark/conf
+
+  executor:
+    cores: 4
+    coreLimit: "4.2"
+    memory: "16g"
+    memoryOverhead: "4096"
+    instances: 10
+    serviceAccount: emr-job-execution-sa
+    volumeMounts:
+    - name: empty-spark-conf
+      mountPath: /usr/lib/spark/conf
