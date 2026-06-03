@@ -1,10 +1,9 @@
----
-# ETL: game_action_logs → game_action_logs_bucket_variant
-# detail STRING → parse_json → VARIANT，其余字段不变
+# ETL: game_action_logs → game_action_logs_8b_variant
+# detail STRING → parse_json → VARIANT，executor 资源翻倍
 apiVersion: "sparkoperator.k8s.io/v1beta2"
 kind: SparkApplication
 metadata:
-  name: variant-mirror-etl
+  name: variant-mirror-etl-8b
   namespace: emr-eks-spark
 spec:
   type: Java
@@ -14,8 +13,16 @@ spec:
   mainApplicationFile: s3a://adap-prototype-812046859005/variant-shredding-test/jars/shredding-etl-1.0.0-shaded.jar
   mainClass: com.example.VariantMirrorEtl
   arguments:
+  - "--src"
+  - "srccat.gamedb.game_action_logs"
   - "--dst"
-  - "srccat.gamedb.game_action_logs_bucket_variant"
+  - "srccat.gamedb.game_action_logs_8b_variant"
+  - "--start"
+  - "2026-04-28"
+  - "--end"
+  - "2026-05-29"
+  - "--repartition"
+  - "200"
   sparkVersion: "4.1.2"
   restartPolicy:
     type: Never
@@ -59,7 +66,7 @@ spec:
     # ── 性能 ──
     spark.sql.adaptive.enabled: "true"
     spark.sql.adaptive.coalescePartitions.enabled: "true"
-    spark.sql.shuffle.partitions: "200"
+    spark.sql.shuffle.partitions: "400"
     spark.task.maxFailures: "8"
     spark.kubernetes.executor.maxPendingPods: "5"
 
@@ -86,10 +93,10 @@ spec:
       mountPath: /usr/lib/spark/conf
 
   executor:
-    cores: 4
-    coreLimit: "4.2"
-    memory: "14g"
-    memoryOverhead: "2048"
+    cores: 8
+    coreLimit: "8.2"
+    memory: "28g"
+    memoryOverhead: "4096"
     instances: 15
     serviceAccount: emr-job-execution-sa
     volumeMounts:

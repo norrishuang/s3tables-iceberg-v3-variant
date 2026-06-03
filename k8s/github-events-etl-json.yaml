@@ -1,10 +1,8 @@
----
-# ETL: game_action_logs → game_action_logs_bucket_variant
-# detail STRING → parse_json → VARIANT，其余字段不变
+# ETL: GitHub Events JSON gz → s3t.github.events_json
 apiVersion: "sparkoperator.k8s.io/v1beta2"
 kind: SparkApplication
 metadata:
-  name: variant-mirror-etl
+  name: github-events-etl-json
   namespace: emr-eks-spark
 spec:
   type: Java
@@ -12,10 +10,16 @@ spec:
   image: 812046859005.dkr.ecr.us-east-1.amazonaws.com/oss-spark:4.1.2-iceberg1.11-s3t
   imagePullPolicy: Always
   mainApplicationFile: s3a://adap-prototype-812046859005/variant-shredding-test/jars/shredding-etl-1.0.0-shaded.jar
-  mainClass: com.example.VariantMirrorEtl
+  mainClass: com.example.GithubEventsEtl
   arguments:
+  - "--src"
+  - "s3a://adap-prototype-812046859005/github-events/"    # ← 改为实际路径
   - "--dst"
-  - "srccat.gamedb.game_action_logs_bucket_variant"
+  - "s3t.github.events_json"
+  - "--mode"
+  - "json"
+  - "--repartition"
+  - "200"
   sparkVersion: "4.1.2"
   restartPolicy:
     type: Never
@@ -28,7 +32,6 @@ spec:
     fs.AbstractFileSystem.s3.impl: org.apache.hadoop.fs.s3a.S3A
 
   sparkConf:
-    # ── 清除 EMR Operator 注入 ──
     spark.driver.extraClassPath: ""
     spark.executor.extraClassPath: ""
     spark.executor.extraLibraryPath: ""
@@ -39,27 +42,17 @@ spec:
     spark.executor.defaultJavaOptions: "-XX:OnOutOfMemoryError='kill -9 %p'"
     spark.driver.defaultJavaOptions: "-XX:OnOutOfMemoryError='kill -9 %p'"
 
-    # ── Iceberg Extension ──
     spark.sql.extensions: "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
 
-    # ── srccat: 源和目标都在 iceberg-data bucket ──
-    spark.sql.catalog.srccat: "org.apache.iceberg.spark.SparkCatalog"
-    spark.sql.catalog.srccat.type: "rest"
-    spark.sql.catalog.srccat.uri: "https://s3tables.us-east-1.amazonaws.com/iceberg"
-    spark.sql.catalog.srccat.rest.auth.type: "sigv4"
-    spark.sql.catalog.srccat.rest.signing-name: "s3tables"
-    spark.sql.catalog.srccat.rest.signing-region: "us-east-1"
-    spark.sql.catalog.srccat.warehouse: "arn:aws:s3tables:us-east-1:812046859005:bucket/iceberg-data-812046859005"
-    spark.sql.catalog.srccat.io-impl: "org.apache.iceberg.aws.s3.S3FileIO"
-    spark.sql.catalog.srccat.rest-metrics-reporting-enabled: "false"
-
-    # ── VARIANT Shredding ──
-    spark.sql.parquet.variantShreddingEnabled: "true"
+    # ── S3 Tables Catalog (s3t) ──
+    spark.sql.catalog.s3t: "org.apache.iceberg.spark.SparkCatalog"
+    spark.sql.catalog.s3t.catalog-impl: "software.amazon.s3tables.iceberg.S3TablesCatalog"
+    spark.sql.catalog.s3t.warehouse: "arn:aws:s3tables:us-east-1:812046859005:bucket/iceberg-data-812046859005"
 
     # ── 性能 ──
     spark.sql.adaptive.enabled: "true"
     spark.sql.adaptive.coalescePartitions.enabled: "true"
-    spark.sql.shuffle.partitions: "200"
+    spark.sql.shuffle.partitions: "400"
     spark.task.maxFailures: "8"
     spark.kubernetes.executor.maxPendingPods: "5"
 
@@ -67,7 +60,6 @@ spec:
     spark.eventLog.enabled: "true"
     spark.eventLog.dir: "s3a://adap-prototype-812046859005/spark-history-logs/"
 
-    # ── EKS 节点选择 ──
     "spark.kubernetes.node.selector.workload-type": "spark-benchmark"
     "spark.kubernetes.node.selector.kubernetes.io/arch": "amd64"
 
@@ -86,10 +78,10 @@ spec:
       mountPath: /usr/lib/spark/conf
 
   executor:
-    cores: 4
-    coreLimit: "4.2"
-    memory: "14g"
-    memoryOverhead: "2048"
+    cores: 8
+    coreLimit: "8.2"
+    memory: "28g"
+    memoryOverhead: "4096"
     instances: 15
     serviceAccount: emr-job-execution-sa
     volumeMounts:
