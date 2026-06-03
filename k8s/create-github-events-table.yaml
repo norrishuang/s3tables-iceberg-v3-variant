@@ -35,6 +35,9 @@ spec:
 
     spark.sql.extensions: "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
 
+    # ── S3 Tables Catalog 依赖 ──
+    "spark.jars.packages": "software.amazon.s3tables:s3-tables-catalog-for-iceberg-runtime:0.1.8"
+
     # ── S3 Tables Catalog (s3t) ──
     spark.sql.catalog.s3t: "org.apache.iceberg.spark.SparkCatalog"
     spark.sql.catalog.s3t.catalog-impl: "software.amazon.s3tables.iceberg.S3TablesCatalog"
@@ -42,6 +45,10 @@ spec:
 
     # ── VARIANT Shredding ──
     spark.sql.parquet.variantShreddingEnabled: "true"
+
+    # ── 事件日志 ──
+    spark.eventLog.enabled: "true"
+    spark.eventLog.dir: "s3a://adap-prototype-812046859005/spark-history-logs/"
 
     "spark.kubernetes.node.selector.workload-type": "spark-benchmark"
     "spark.kubernetes.node.selector.kubernetes.io/arch": "amd64"

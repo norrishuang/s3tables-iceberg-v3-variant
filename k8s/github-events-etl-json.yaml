@@ -13,7 +13,7 @@ spec:
   mainClass: com.example.GithubEventsEtl
   arguments:
   - "--src"
-  - "s3a://adap-prototype-812046859005/github-events/"    # ← 改为实际路径
+  - "s3a://adap-prototype-812046859005/github-events/"
   - "--dst"
   - "s3t.github.events_json"
   - "--mode"
@@ -43,6 +43,9 @@ spec:
     spark.driver.defaultJavaOptions: "-XX:OnOutOfMemoryError='kill -9 %p'"
 
     spark.sql.extensions: "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+
+    # ── S3 Tables Catalog 依赖 ──
+    "spark.jars.packages": "software.amazon.s3tables:s3-tables-catalog-for-iceberg-runtime:0.1.8"
 
     # ── S3 Tables Catalog (s3t) ──
     spark.sql.catalog.s3t: "org.apache.iceberg.spark.SparkCatalog"

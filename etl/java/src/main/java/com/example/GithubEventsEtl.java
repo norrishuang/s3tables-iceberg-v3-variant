@@ -52,10 +52,10 @@ public class GithubEventsEtl {
         // 根据 mode 构建不同的 SELECT 表达式
         String actorExpr, repoExpr, payloadExpr, orgExpr;
         if ("variant".equals(mode)) {
-            actorExpr = "parse_json(to_json(actor)) AS actor";
-            repoExpr = "parse_json(to_json(repo)) AS repo";
+            actorExpr = "to_json(actor) AS actor";
+            repoExpr = "to_json(repo) AS repo";
             payloadExpr = "parse_json(to_json(payload)) AS payload";
-            orgExpr = "parse_json(to_json(org)) AS org";
+            orgExpr = "to_json(org) AS org";
         } else {
             actorExpr = "to_json(actor) AS actor";
             repoExpr = "to_json(repo) AS repo";

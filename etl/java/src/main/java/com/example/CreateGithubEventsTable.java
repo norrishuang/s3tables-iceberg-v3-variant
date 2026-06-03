@@ -51,17 +51,17 @@ public class CreateGithubEventsTable {
         spark.sql(jsonTable);
         log.info("events_json created.");
 
-        // === Variant 表: object 字段存为 VARIANT ===
+        // === Variant 表: 仅 payload 为 VARIANT ===
         String variantTable = """
             CREATE TABLE IF NOT EXISTS s3t.github.events_variant (
                 id              STRING      COMMENT '事件ID',
                 type            STRING      COMMENT '事件类型',
                 public          BOOLEAN     COMMENT '是否公开',
                 created_at      TIMESTAMP   COMMENT '事件时间',
-                actor           VARIANT     COMMENT 'Actor对象 (variant shredding)',
-                repo            VARIANT     COMMENT 'Repo对象 (variant shredding)',
+                actor           STRING      COMMENT 'Actor对象 (JSON string)',
+                repo            STRING      COMMENT 'Repo对象 (JSON string)',
                 payload         VARIANT     COMMENT 'Payload对象 (variant shredding)',
-                org             VARIANT     COMMENT 'Org对象 (variant shredding, 可空)'
+                org             STRING      COMMENT 'Org对象 (JSON string, 可空)'
             )
             USING iceberg
             PARTITIONED BY (days(created_at), type)
