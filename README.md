@@ -27,6 +27,11 @@
 │   ├── entrypoint-wrapper.sh       # 过滤 EMR Operator 注入的类名和路径
 │   └── spark-submit-wrapper.sh     # spark-submit 包装脚本
 │
+├── kafka-streaming/
+│   ├── Dockerfile                  # Spark + Python 3.11 + Kafka + S3TablesCatalog 镜像
+│   ├── kafka-streaming.yaml        # SparkApplication YAML（Spark Operator）
+│   └── kafka_streaming_to_iceberg.py  # PySpark Structured Streaming 脚本
+│
 ├── k8s/
 │   ├── variant-test-etl-java.yaml  # 主 ETL Job（40亿行全量写入）
 │   ├── variant-shredding-setup.yaml# 建表 + 数据生成 Job（1000万行模拟数据）
@@ -51,10 +56,32 @@
 ### 1. 为什么用 Java 而不是 PySpark
 PySpark 在 EKS 上会触发 `Py4J ReflectionCommand`，扫描 641MB 的 `aws-java-sdk-bundle` 时 Thread-5 CPU 飙升到 460s+，永远不会结束。Java 直接构建 SparkSession，完全绕开此问题。
 
-### 2. REST Catalog（不是 s3-tables-catalog-for-iceberg）
-`s3-tables-catalog-for-iceberg` 只支持 Spark 3.x，Spark 4.x 必须使用 REST Catalog + SigV4 签名。
+### 2. REST Catalog vs S3TablesCatalog
 
-关键配置：
+**重要发现**：Iceberg REST Catalog（`org.apache.iceberg.rest.RESTCatalog`）**不支持**通过 Spark DDL 创建 `format-version = 3` 的表。执行 `CREATE TABLE ... TBLPROPERTIES ('format-version' = '3')` 时，S3 Tables REST API 会返回：
+
+```
+org.apache.iceberg.exceptions.BadRequestException: Malformed request: The specified metadata is not valid
+```
+
+这是因为 S3 Tables 的 Iceberg REST endpoint 在处理 format-version=3 的 table metadata（包含 VARIANT 类型定义）时不兼容。
+
+**解决方案**：
+
+| 操作 | 使用的 Catalog 实现 | 说明 |
+|------|---------------------|------|
+| **建表（DDL）** | `software.amazon.s3tables.iceberg.S3TablesCatalog` | 需要 `s3-tables-catalog-for-iceberg-runtime` JAR |
+| **读写数据** | 两者均可 | REST Catalog 对已有表的读写正常 |
+
+在需要建表的场景（如 Streaming 程序需要自动建表），使用 S3TablesCatalog：
+```yaml
+spark.sql.catalog.s3tablesbucket: org.apache.iceberg.spark.SparkCatalog
+spark.sql.catalog.s3tablesbucket.catalog-impl: software.amazon.s3tables.iceberg.S3TablesCatalog
+spark.sql.catalog.s3tablesbucket.warehouse: arn:aws:s3tables:us-east-1:812046859005:bucket/<bucket-name>
+spark.sql.catalog.s3tablesbucket.client.region: us-east-1
+```
+
+在只做读写（表已存在）的场景，REST Catalog 仍然可用：
 ```yaml
 spark.sql.catalog.s3tablesbucket: org.apache.iceberg.spark.SparkCatalog
 spark.sql.catalog.s3tablesbucket.catalog-impl: org.apache.iceberg.rest.RESTCatalog
