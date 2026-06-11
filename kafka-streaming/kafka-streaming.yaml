@@ -1,10 +1,10 @@
 ---
-# Kafka Structured Streaming → S3 Tables (VARIANT + Shredding)
-# 消费 MSK topic agent.spans → 写入 s3tablesbucket.tracelog.agent_spans
+# OTel Kafka Structured Streaming → S3 Tables (VARIANT + Shredding)
+# 消费 MSK topic agent.spans.otlp（OpenTelemetry 格式） → 写入 s3tablesbucket.tracelog.otel_spans
 apiVersion: "sparkoperator.k8s.io/v1beta2"
 kind: SparkApplication
 metadata:
-  name: agent-spans-kafka-streaming
+  name: otel-spans-kafka-streaming
   namespace: emr-eks-spark
 spec:
   type: Python
@@ -12,13 +12,15 @@ spec:
   mode: cluster
   image: "812046859005.dkr.ecr.us-east-1.amazonaws.com/oss-spark:4.1.2-iceberg1.11-s3t-kafka"
   imagePullPolicy: Always
-  mainApplicationFile: "s3a://adap-prototype-812046859005/variant-shredding-test/scripts/kafka_streaming_to_iceberg.py"
+  mainApplicationFile: "s3a://adap-prototype-812046859005/variant-shredding-test/scripts/otel_streaming_to_iceberg.py"
   sparkVersion: "4.1.2"
   arguments:
-    - "--namespace"
-    - "tracelog"
+    - "--topic"
+    - "agent.spans.otlp"
     - "--starting-offsets"
     - "earliest"
+    - "--trigger-interval"
+    - "120 seconds"
   restartPolicy:
     type: OnFailure
     onFailureRetries: 3
@@ -67,7 +69,7 @@ spec:
     spark.default.parallelism: "200"
 
     # ── Streaming 配置 ──
-    spark.sql.streaming.checkpointLocation: "s3a://adap-prototype-812046859005/variant-shredding-test/checkpoints/kafka-streaming-v2/"
+    spark.sql.streaming.checkpointLocation: "s3a://adap-prototype-812046859005/variant-shredding-test/checkpoints/otel-streaming/"
     spark.streaming.stopGracefullyOnShutdown: "true"
 
     # ── EKS 节点选择 ──
@@ -92,8 +94,8 @@ spec:
   executor:
     cores: 4
     coreLimit: "4000m"
-    memory: "8g"
-    instances: 3
+    memory: "12g"
+    instances: 10
     labels:
       version: "4.1.2"
     volumeMounts:

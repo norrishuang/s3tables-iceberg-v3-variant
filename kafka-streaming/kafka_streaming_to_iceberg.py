@@ -263,7 +263,7 @@ def main():
         .option("subscribe", args.topic)
         .option("startingOffsets", args.starting_offsets)
         # 防止单批次拉取过多消息导致 OOM
-        .option("maxOffsetsPerTrigger", 100_000)
+        .option("maxOffsetsPerTrigger", 500_000)
         # Kafka 连接安全选项（MSK 使用 PLAINTEXT，若需要 TLS 可按需修改）
         .option("kafka.security.protocol", "PLAINTEXT")
         .load()

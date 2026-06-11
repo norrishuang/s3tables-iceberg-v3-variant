@@ -174,3 +174,85 @@ kubectl logs -f <driver-pod-name> -n emr-eks-spark
 - Q3: 多 aid 过滤（中间场景）
 - Q4: 嵌套字段聚合（验证 shredding 对嵌套字段效果）
 - 每个查询跑 3 次取均值，对比 no_bucket vs with_bucket
+
+## Kafka Streaming — OpenTelemetry 格式适配
+
+### 背景
+
+源端 AI Agent 调用链数据从自定义 JSON 格式切换为 **OpenTelemetry (OTel) 标准格式**输出。
+
+### OTel vs 旧格式主要差异
+
+| 维度 | 旧格式（agent.spans） | OTel 格式（agent.spans.otlp） |
+|------|----------------------|-------------------------------|
+| 结构 | 打平的单层 JSON | `resourceSpans > scopeSpans > spans` 三层嵌套 |
+| 时间戳 | ISO 8601 字符串 | 纳秒级 Unix int（`startTimeUnixNano`） |
+| service.name | 顶层字段 | Resource attributes 里的 key-value |
+| attributes | 直接 JSON object | key-value 数组：`[{"key":"k","value":{"stringValue":"v"}}]` |
+| input/output messages | attributes 中嵌套 | `events` 数组，每条消息一个 event |
+| duration_ms | 显式字段 | 无，需从 start/end 计算 |
+
+### 存储设计（otel_spans 表）
+
+```
+tracelog.otel_spans
+├── 结构化列（高频查询，分区下推）
+│   ├── trace_id, span_id, parent_span_id, name, kind
+│   ├── start_time (TIMESTAMP) ← startTimeUnixNano / 1e9
+│   ├── end_time, duration_ms (计算得出)
+│   ├── status_code
+│   └── service_name, service_version, deployment_env ← 从 resource.attributes 提取
+│
+├── VARIANT + Shredding（半结构化，高频子字段自动列化）
+│   ├── attributes    ← span.attributes 转扁平 map
+│   └── events        ← span.events 转扁平格式
+│
+└── VARIANT（低频兜底）
+    └── resource_attributes ← 完整 resource attributes
+```
+
+**分区策略**：`PARTITIONED BY (days(start_time))`
+
+### Attributes 扁平化处理
+
+OTel 原始 attributes 为 key-value 数组格式：
+```json
+[
+  {"key": "gen_ai.usage.input_tokens", "value": {"intValue": "3421"}},
+  {"key": "gen_ai.system", "value": {"stringValue": "anthropic"}}
+]
+```
+
+写入 S3 Tables 前转换为扁平 map（对 Parquet Shredding 更友好）：
+```json
+{
+  "gen_ai.usage.input_tokens": 3421,
+  "gen_ai.system": "anthropic"
+}
+```
+
+Shredding 会自动将高频出现的 key（如 `gen_ai.usage.input_tokens`、`gen_ai.system`）拆为独立 Parquet 列，查询时直接列式读取，性能接近结构化字段。
+
+### 部署
+
+```bash
+# 1. 上传脚本
+aws s3 cp kafka-streaming/otel_streaming_to_iceberg.py \
+    s3://adap-prototype-812046859005/variant-shredding-test/scripts/
+
+# 2. 提交 SparkApplication
+kubectl apply -f kafka-streaming/kafka-streaming.yaml
+
+# 3. 查看日志
+kubectl logs -f -n emr-eks-spark \
+    $(kubectl get pod -n emr-eks-spark -l spark-app-name=otel-spans-kafka-streaming,spark-role=driver \
+      -o jsonpath='{.items[0].metadata.name}')
+```
+
+### 文件说明
+
+| 文件 | 说明 |
+|------|------|
+| `kafka_streaming_to_iceberg.py` | 旧版脚本（消费 agent.spans，自定义 JSON 格式） |
+| `otel_streaming_to_iceberg.py` | **新版脚本**（消费 agent.spans.otlp，OTel 标准格式） |
+| `kafka-streaming.yaml` | SparkApplication 配置（已切换到 OTel 版） |
