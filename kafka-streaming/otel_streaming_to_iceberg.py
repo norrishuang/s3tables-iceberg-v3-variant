@@ -25,6 +25,7 @@ from pyspark.sql.functions import (
 )
 from pyspark.sql.types import (
     StructType, StructField, StringType, ArrayType, LongType, IntegerType, MapType,
+    DoubleType, BooleanType,
 )
 
 logging.basicConfig(
@@ -70,15 +71,32 @@ TBLPROPERTIES (
 # --------------------------------------------------------------------------
 # OTel JSON Schema（用于 from_json 解析）
 # --------------------------------------------------------------------------
-OTEL_ATTR_SCHEMA = ArrayType(StructType([
+# OTel attribute value 类型
+OTEL_ATTR_VALUE_SCHEMA = StructType([
+    StructField("stringValue", StringType()),
+    StructField("intValue", StringType()),
+    StructField("doubleValue", DoubleType()),
+    StructField("boolValue", BooleanType()),
+    StructField("arrayValue", StructType([
+        StructField("values", ArrayType(StructType([
+            StructField("stringValue", StringType()),
+            StructField("intValue", StringType()),
+            StructField("doubleValue", DoubleType()),
+        ])))
+    ])),
+])
+
+# OTel key-value 数组（attributes）
+OTEL_KV_ARRAY_SCHEMA = ArrayType(StructType([
     StructField("key", StringType()),
-    StructField("value", StringType()),  # 先当 string，后面用 UDF 提取
+    StructField("value", OTEL_ATTR_VALUE_SCHEMA),
 ]))
 
-OTEL_EVENT_SCHEMA = ArrayType(StructType([
+# OTel event schema
+OTEL_EVENT_ARRAY_SCHEMA = ArrayType(StructType([
     StructField("timeUnixNano", StringType()),
     StructField("name", StringType()),
-    StructField("attributes", StringType()),
+    StructField("attributes", OTEL_KV_ARRAY_SCHEMA),
 ]))
 
 SPAN_SCHEMA = StructType([
@@ -90,8 +108,8 @@ SPAN_SCHEMA = StructType([
     StructField("startTimeUnixNano", StringType()),
     StructField("endTimeUnixNano", StringType()),
     StructField("status", StructType([StructField("code", IntegerType())])),
-    StructField("attributes", StringType()),  # raw JSON string
-    StructField("events", StringType()),      # raw JSON string
+    StructField("attributes", OTEL_KV_ARRAY_SCHEMA),
+    StructField("events", OTEL_EVENT_ARRAY_SCHEMA),
 ])
 
 SCOPE_SPANS_SCHEMA = StructType([
@@ -104,7 +122,7 @@ SCOPE_SPANS_SCHEMA = StructType([
 
 RESOURCE_SPANS_SCHEMA = ArrayType(StructType([
     StructField("resource", StructType([
-        StructField("attributes", StringType()),  # raw JSON string
+        StructField("attributes", OTEL_KV_ARRAY_SCHEMA),
     ])),
     StructField("scopeSpans", ArrayType(SCOPE_SPANS_SCHEMA)),
 ]))
@@ -301,14 +319,14 @@ def parse_otel_message(raw_df):
         # duration_ms
         ((col("span.endTimeUnixNano").cast("long") - col("span.startTimeUnixNano").cast("long")) / 1_000_000).cast("bigint").alias("duration_ms"),
         col("span.status.code").alias("status_code"),
-        # 从 resource attributes 提取 service 信息
-        extract_otel_attr_value(col("resource_attrs_raw"), lit("service.name")).alias("service_name"),
-        extract_otel_attr_value(col("resource_attrs_raw"), lit("service.version")).alias("service_version"),
-        extract_otel_attr_value(col("resource_attrs_raw"), lit("deployment.environment")).alias("deployment_env"),
-        # VARIANT 字段：扁平化后转 VARIANT
-        parse_json(flatten_otel_attributes(col("span.attributes"))).alias("attributes"),
-        parse_json(flatten_otel_events(col("span.events"))).alias("events"),
-        parse_json(flatten_otel_attributes(col("resource_attrs_raw"))).alias("resource_attributes"),
+        # 从 resource attributes 提取 service 信息（to_json 保证 UTF-8）
+        extract_otel_attr_value(to_json(col("resource_attrs_raw")), lit("service.name")).alias("service_name"),
+        extract_otel_attr_value(to_json(col("resource_attrs_raw")), lit("service.version")).alias("service_version"),
+        extract_otel_attr_value(to_json(col("resource_attrs_raw")), lit("deployment.environment")).alias("deployment_env"),
+        # VARIANT 字段：to_json() 保证 UTF-8 正确，再传给 UDF
+        parse_json(flatten_otel_attributes(to_json(col("span.attributes")))).alias("attributes"),
+        parse_json(flatten_otel_events(to_json(col("span.events")))).alias("events"),
+        parse_json(flatten_otel_attributes(to_json(col("resource_attrs_raw")))).alias("resource_attributes"),
     )
     return result
 
