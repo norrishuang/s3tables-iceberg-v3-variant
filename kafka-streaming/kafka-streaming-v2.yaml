@@ -1,0 +1,96 @@
+---
+# OTel Kafka Structured Streaming → S3 Tables (VARIANT + Shredding) V2
+# 消费 MSK topic agent.spans.otlp.v2 → 写入 s3tablesbucket.tracelog.otel_spans_v2
+apiVersion: "sparkoperator.k8s.io/v1beta2"
+kind: SparkApplication
+metadata:
+  name: otel-spans-kafka-streaming-v2
+  namespace: emr-eks-spark
+spec:
+  type: Python
+  pythonVersion: "3"
+  mode: cluster
+  image: "812046859005.dkr.ecr.us-east-1.amazonaws.com/oss-spark:4.1.2-iceberg1.11-s3t-kafka"
+  imagePullPolicy: Always
+  mainApplicationFile: "s3a://adap-prototype-812046859005/variant-shredding-test/scripts/otel_streaming_to_iceberg_v2.py"
+  sparkVersion: "4.1.2"
+  arguments:
+    - "--topic"
+    - "agent.spans.otlp.v2"
+    - "--starting-offsets"
+    - "earliest"
+    - "--trigger-interval"
+    - "120 seconds"
+  restartPolicy:
+    type: OnFailure
+    onFailureRetries: 3
+    onFailureRetryInterval: 30
+    onSubmissionFailureRetries: 5
+    onSubmissionFailureRetryInterval: 20
+
+  hadoopConf:
+    fs.s3.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+    fs.s3a.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+    fs.s3a.endpoint.region: us-east-1
+    fs.s3a.path.style.access: "false"
+    fs.AbstractFileSystem.s3.impl: org.apache.hadoop.fs.s3a.S3A
+
+  sparkConf:
+    spark.driver.extraClassPath: ""
+    spark.executor.extraClassPath: ""
+    spark.executor.extraLibraryPath: ""
+    spark.driver.extraLibraryPath: ""
+    spark.sql.emr.internal.extensions: ""
+    spark.hadoop.mapreduce.output.fs.optimized.committer.enabled: "false"
+    spark.sql.parquet.fs.optimized.committer.optimization-enabled: "false"
+    spark.executor.defaultJavaOptions: "-XX:OnOutOfMemoryError='kill -9 %p'"
+    spark.driver.defaultJavaOptions: "-XX:OnOutOfMemoryError='kill -9 %p'"
+    spark.eventLog.enabled: "false"
+
+    spark.sql.extensions: "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+
+    spark.sql.catalog.s3tablesbucket: "org.apache.iceberg.spark.SparkCatalog"
+    spark.sql.catalog.s3tablesbucket.catalog-impl: "software.amazon.s3tables.iceberg.S3TablesCatalog"
+    spark.sql.catalog.s3tablesbucket.warehouse: "arn:aws:s3tables:us-east-1:812046859005:bucket/iceberg-data-812046859005"
+    spark.sql.catalog.s3tablesbucket.client.region: "us-east-1"
+    spark.sql.defaultCatalog: "s3tablesbucket"
+
+    spark.sql.parquet.variantShreddingEnabled: "true"
+    spark.sql.parquet.enableNestedColumnVectorizedReader: "true"
+
+    spark.sql.adaptive.enabled: "true"
+    spark.sql.adaptive.coalescePartitions.enabled: "true"
+    spark.sql.shuffle.partitions: "200"
+    spark.default.parallelism: "200"
+
+    spark.sql.streaming.checkpointLocation: "s3a://adap-prototype-812046859005/variant-shredding-test/checkpoints/otel-streaming-v2/"
+    spark.streaming.stopGracefullyOnShutdown: "true"
+
+    "spark.kubernetes.node.selector.workload-type": "spark-benchmark"
+    "spark.kubernetes.node.selector.kubernetes.io/arch": "amd64"
+
+  volumes:
+  - name: empty-spark-conf
+    emptyDir: {}
+
+  driver:
+    cores: 2
+    coreLimit: "2000m"
+    memory: "4g"
+    serviceAccount: emr-job-execution-sa
+    labels:
+      version: "4.1.2"
+    volumeMounts:
+    - name: empty-spark-conf
+      mountPath: /usr/lib/spark/conf
+
+  executor:
+    cores: 4
+    coreLimit: "4000m"
+    memory: "12g"
+    instances: 10
+    labels:
+      version: "4.1.2"
+    volumeMounts:
+    - name: empty-spark-conf
+      mountPath: /usr/lib/spark/conf

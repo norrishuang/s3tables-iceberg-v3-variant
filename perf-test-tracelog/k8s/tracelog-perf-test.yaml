@@ -1,0 +1,69 @@
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: tracelog-perf-test
+  namespace: emr-eks-spark
+spec:
+  type: Java
+  mode: cluster
+  image: 812046859005.dkr.ecr.us-east-1.amazonaws.com/oss-spark:4.1.2-iceberg1.11-s3t
+  imagePullPolicy: Always
+  mainClass: com.example.TraceLogPerfTest
+  mainApplicationFile: s3a://adap-prototype-812046859005/variant-shredding-test/jars/tracelog-perf-test-1.0.0-shaded.jar
+  sparkVersion: "4.1.2"
+  restartPolicy:
+    type: Never
+  volumes:
+    - name: spark-conf-empty
+      emptyDir: {}
+  sparkConf:
+    # Catalog - REST Catalog for read-only queries
+    spark.sql.catalog.s3tablesbucket: org.apache.iceberg.spark.SparkCatalog
+    spark.sql.catalog.s3tablesbucket.catalog-impl: org.apache.iceberg.rest.RESTCatalog
+    spark.sql.catalog.s3tablesbucket.uri: https://s3tables.us-east-1.amazonaws.com/iceberg
+    spark.sql.catalog.s3tablesbucket.rest.auth.type: sigv4
+    spark.sql.catalog.s3tablesbucket.rest.signing-name: s3tables
+    spark.sql.catalog.s3tablesbucket.rest.signing-region: us-east-1
+    spark.sql.catalog.s3tablesbucket.warehouse: arn:aws:s3tables:us-east-1:812046859005:bucket/iceberg-data-812046859005
+    # Iceberg / Variant
+    spark.sql.parquet.variantShreddingEnabled: "true"
+    spark.sql.extensions: org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+    # S3 access
+    spark.hadoop.fs.s3a.aws.credentials.provider: com.amazonaws.auth.WebIdentityTokenCredentialsProvider
+    spark.hadoop.fs.s3a.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+    # Performance
+    spark.sql.adaptive.enabled: "true"
+    spark.sql.shuffle.partitions: "200"
+    # Event log
+    spark.eventLog.enabled: "true"
+    spark.eventLog.dir: s3a://adap-prototype-812046859005/spark-event-logs/
+    # Clear EMR operator injections
+    spark.driver.extraClassPath: ""
+    spark.executor.extraClassPath: ""
+  driver:
+    cores: 4
+    memory: "8g"
+    memoryOverhead: "2g"
+    serviceAccount: emr-job-execution-sa
+    nodeSelector:
+      workload-type: spark-benchmark
+    volumeMounts:
+      - name: spark-conf-empty
+        mountPath: /usr/lib/spark/conf
+    env:
+      - name: JAVA_TOOL_OPTIONS
+        value: ""
+  executor:
+    cores: 4
+    instances: 10
+    memory: "12g"
+    memoryOverhead: "2g"
+    serviceAccount: emr-job-execution-sa
+    nodeSelector:
+      workload-type: spark-benchmark
+    volumeMounts:
+      - name: spark-conf-empty
+        mountPath: /usr/lib/spark/conf
+    env:
+      - name: JAVA_TOOL_OPTIONS
+        value: ""

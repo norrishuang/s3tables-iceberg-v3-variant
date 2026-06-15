@@ -1,7 +1,7 @@
 """
 otel_streaming_to_iceberg.py
 ============================
-Spark 4.1 Structured Streaming：消费 MSK Kafka topic `agent.spans.otlp`，
+Spark 4.1 Structured Streaming：消费 MSK Kafka topic `agent.spans.otlp.v2`，
 解析 OpenTelemetry (OTel) 标准格式 JSON，写入 S3 Tables Iceberg v3 表。
 
 OTel 格式特点：
@@ -33,14 +33,14 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
 )
-logger = logging.getLogger("OtelStreamingToIceberg")
+logger = logging.getLogger("OtelStreamingToIcebergV2")
 
 # --------------------------------------------------------------------------
 # 目标表
 # --------------------------------------------------------------------------
 CATALOG = "s3tablesbucket"
 NAMESPACE = "tracelog"
-TABLE_NAME = "otel_spans"
+TABLE_NAME = "otel_spans_v2"
 TABLE_FULL_NAME = f"{CATALOG}.{NAMESPACE}.{TABLE_NAME}"
 
 CREATE_TABLE_DDL = f"""
@@ -252,8 +252,8 @@ def parse_args():
         "boot-hnb.democluster.5ay35d.c11.kafka.us-east-1.amazonaws.com:9092,"
         "boot-fbo.democluster.5ay35d.c11.kafka.us-east-1.amazonaws.com:9092"
     ))
-    parser.add_argument("--topic", default="agent.spans.otlp")
-    parser.add_argument("--checkpoint", default="s3a://adap-prototype-812046859005/variant-shredding-test/checkpoints/otel-streaming/")
+    parser.add_argument("--topic", default="agent.spans.otlp.v2")
+    parser.add_argument("--checkpoint", default="s3a://adap-prototype-812046859005/variant-shredding-test/checkpoints/otel-streaming-v2/")
     parser.add_argument("--trigger-interval", default="120 seconds")
     parser.add_argument("--starting-offsets", default="latest")
     return parser.parse_args()
@@ -389,7 +389,7 @@ def write_batch(batch_df, batch_id: int) -> None:
 def main():
     args = parse_args()
 
-    spark = SparkSession.builder.appName("OtelStreamingToIceberg").getOrCreate()
+    spark = SparkSession.builder.appName("OtelStreamingToIceberg-V2").getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
 
     logger.info("参数: topic=%s, trigger=%s, checkpoint=%s",
