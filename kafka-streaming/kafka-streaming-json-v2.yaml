@@ -16,7 +16,7 @@ spec:
   sparkVersion: "4.1.2"
   arguments:
     - "--topic"
-    - "agent.spans.otlp.v2"
+    - "agent.spans"
     - "--starting-offsets"
     - "earliest"
     - "--trigger-interval"

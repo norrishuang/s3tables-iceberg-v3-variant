@@ -34,9 +34,9 @@ spec:
     # Performance
     spark.sql.adaptive.enabled: "true"
     spark.sql.shuffle.partitions: "200"
+    spark.kubernetes.node.selector.kubernetes.io/arch: amd64
     # Event log
-    spark.eventLog.enabled: "true"
-    spark.eventLog.dir: s3a://adap-prototype-812046859005/spark-event-logs/
+    spark.eventLog.enabled: "false"
     # Clear EMR operator injections
     spark.driver.extraClassPath: ""
     spark.executor.extraClassPath: ""

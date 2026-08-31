@@ -16,7 +16,7 @@ spec:
   sparkVersion: "4.1.2"
   arguments:
     - "--topic"
-    - "agent.spans.otlp.v2"
+    - "agent.spans"
     - "--starting-offsets"
     - "earliest"
     - "--trigger-interval"
@@ -55,7 +55,7 @@ spec:
     spark.sql.catalog.s3tablesbucket.client.region: "us-east-1"
     spark.sql.defaultCatalog: "s3tablesbucket"
 
-    spark.sql.parquet.variantShreddingEnabled: "true"
+    spark.sql.iceberg.shred-variants: "true"
     spark.sql.parquet.enableNestedColumnVectorizedReader: "true"
 
     spark.sql.adaptive.enabled: "true"

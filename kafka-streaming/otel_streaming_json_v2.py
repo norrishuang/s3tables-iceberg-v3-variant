@@ -306,11 +306,11 @@ def write_batch(batch_df, batch_id):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bootstrap", default=(
-        "boot-929.democluster.5ay35d.c11.kafka.us-east-1.amazonaws.com:9092,"
-        "boot-hnb.democluster.5ay35d.c11.kafka.us-east-1.amazonaws.com:9092,"
-        "boot-fbo.democluster.5ay35d.c11.kafka.us-east-1.amazonaws.com:9092"
+        "boot-oej.ebs3tablesdemo.bv5co8.c1.kafka.us-east-1.amazonaws.com:9092,"
+        "boot-wfh.ebs3tablesdemo.bv5co8.c1.kafka.us-east-1.amazonaws.com:9092,"
+        "boot-idd.ebs3tablesdemo.bv5co8.c1.kafka.us-east-1.amazonaws.com:9092"
     ))
-    parser.add_argument("--topic", default="agent.spans.otlp.v2")
+    parser.add_argument("--topic", default="agent.spans")
     parser.add_argument("--checkpoint", default="s3a://adap-prototype-812046859005/variant-shredding-test/checkpoints/otel-streaming-json-v2/")
     parser.add_argument("--trigger-interval", default="120 seconds")
     parser.add_argument("--starting-offsets", default="latest")

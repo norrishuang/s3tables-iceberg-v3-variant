@@ -65,7 +65,8 @@ USING iceberg
 PARTITIONED BY (days(start_time))
 TBLPROPERTIES (
     'format-version' = '3',
-    'write.parquet.compression-codec' = 'zstd'
+    'write.parquet.compression-codec' = 'zstd',
+    'write.parquet.shred-variants' = 'true'
 )
 """
 
@@ -248,11 +249,11 @@ def flatten_otel_events(events_json: str) -> str:
 def parse_args():
     parser = argparse.ArgumentParser(description="OTel Kafka Streaming → S3 Tables Iceberg")
     parser.add_argument("--bootstrap", default=(
-        "boot-929.democluster.5ay35d.c11.kafka.us-east-1.amazonaws.com:9092,"
-        "boot-hnb.democluster.5ay35d.c11.kafka.us-east-1.amazonaws.com:9092,"
-        "boot-fbo.democluster.5ay35d.c11.kafka.us-east-1.amazonaws.com:9092"
+        "boot-oej.ebs3tablesdemo.bv5co8.c1.kafka.us-east-1.amazonaws.com:9092,"
+        "boot-wfh.ebs3tablesdemo.bv5co8.c1.kafka.us-east-1.amazonaws.com:9092,"
+        "boot-idd.ebs3tablesdemo.bv5co8.c1.kafka.us-east-1.amazonaws.com:9092"
     ))
-    parser.add_argument("--topic", default="agent.spans.otlp.v2")
+    parser.add_argument("--topic", default="agent.spans")
     parser.add_argument("--checkpoint", default="s3a://adap-prototype-812046859005/variant-shredding-test/checkpoints/otel-streaming-v2/")
     parser.add_argument("--trigger-interval", default="120 seconds")
     parser.add_argument("--starting-offsets", default="latest")
