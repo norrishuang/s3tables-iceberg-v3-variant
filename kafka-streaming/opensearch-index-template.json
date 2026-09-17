@@ -1,0 +1,126 @@
+{
+  "index_patterns": [
+    "agent-trace-logs-*"
+  ],
+  "priority": 200,
+  "template": {
+    "settings": {
+      "number_of_shards": 3,
+      "number_of_replicas": 1,
+      "refresh_interval": "10s",
+      "index.codec": "best_compression",
+      "index.mapping.total_fields.limit": 500,
+      "index.derived_source.enabled": false,
+      "plugins.index_state_management.rollover_alias": "agent-trace-logs"
+    },
+    "mappings": {
+      "dynamic": "strict",
+      "properties": {
+        "documentId": {
+          "type": "keyword"
+        },
+        "traceId": {
+          "type": "keyword"
+        },
+        "spanId": {
+          "type": "keyword"
+        },
+        "parentSpanId": {
+          "type": "keyword"
+        },
+        "name": {
+          "type": "keyword",
+          "fields": {
+            "text": {
+              "type": "text"
+            }
+          }
+        },
+        "kind": {
+          "type": "short"
+        },
+        "startTime": {
+          "type": "date",
+          "format": "strict_date_optional_time||epoch_millis"
+        },
+        "endTime": {
+          "type": "date",
+          "format": "strict_date_optional_time||epoch_millis"
+        },
+        "durationInNanos": {
+          "type": "long"
+        },
+        "status": {
+          "type": "object",
+          "dynamic": "strict",
+          "properties": {
+            "code": {
+              "type": "short"
+            }
+          }
+        },
+        "serviceName": {
+          "type": "keyword"
+        },
+        "serviceVersion": {
+          "type": "keyword"
+        },
+        "deploymentEnvironment": {
+          "type": "keyword"
+        },
+        "scopeName": {
+          "type": "keyword"
+        },
+        "scopeVersion": {
+          "type": "keyword"
+        },
+        "genAiOperationName": {
+          "type": "keyword"
+        },
+        "genAiAgentName": {
+          "type": "keyword"
+        },
+        "genAiRequestModel": {
+          "type": "keyword"
+        },
+        "inputTokens": {
+          "type": "long"
+        },
+        "outputTokens": {
+          "type": "long"
+        },
+        "attributesJson": {
+          "type": "text",
+          "index": false
+        },
+        "eventsJson": {
+          "type": "text",
+          "index": false
+        },
+        "resourceAttributesJson": {
+          "type": "text",
+          "index": false
+        },
+        "kafkaTopic": {
+          "type": "keyword"
+        },
+        "kafkaPartition": {
+          "type": "integer"
+        },
+        "kafkaOffset": {
+          "type": "long"
+        },
+        "ingestedAt": {
+          "type": "date",
+          "format": "strict_date_optional_time||epoch_millis"
+        }
+      }
+    }
+  },
+  "_meta": {
+    "description": "OTLP agent trace log template with ISM rollover alias",
+    "connector": "org.opensearch.client:opensearch-spark-40_2.13:2.0.0",
+    "target_opensearch": "3.x",
+    "rollover_policy": "agent-trace-logs-rollover-policy"
+  }
+}

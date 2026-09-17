@@ -1,0 +1,129 @@
+---
+# 部署前替换以下三个值。目标 domain 的 resource policy 要求 IAM SigV4。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-opensearch-streaming-config
+  namespace: emr-eks-spark
+data:
+  kafkaBootstrapServers: "replace-with-kafka-bootstrap-servers"
+  opensearchEndpoint: "https://replace-with-opensearch-domain-endpoint"
+  checkpointLocation: "s3a://replace-with-checkpoint-bucket/checkpoints/otel-opensearch/"
+---
+# OTel Kafka Structured Streaming -> Amazon OpenSearch Service 3.x
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: otel-spans-kafka-to-opensearch
+  namespace: emr-eks-spark
+spec:
+  type: Python
+  pythonVersion: "3"
+  mode: cluster
+  image: "replace-me.invalid/oss-spark:4.1.2-iceberg1.11-kafka-opensearch2.0"
+  imagePullPolicy: Always
+  mainApplicationFile: "local:///opt/spark/work-dir/otel_streaming_to_opensearch.py"
+  sparkVersion: "4.1.2"
+  arguments:
+    - "--topic"
+    - "agent.spans.otlp"
+    - "--opensearch-index"
+    - "agent-trace-logs"
+    - "--aws-region"
+    - "us-east-1"
+    - "--starting-offsets"
+    - "latest"
+    - "--trigger-interval"
+    - "30 seconds"
+    - "--max-offsets-per-trigger"
+    - "50000"
+    - "--write-partitions"
+    - "10"
+
+  restartPolicy:
+    type: OnFailure
+    onFailureRetries: 3
+    onFailureRetryInterval: 30
+    onSubmissionFailureRetries: 5
+    onSubmissionFailureRetryInterval: 20
+
+  hadoopConf:
+    fs.s3.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+    fs.s3a.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+    fs.s3a.endpoint.region: us-east-1
+    fs.s3a.path.style.access: "false"
+    fs.AbstractFileSystem.s3.impl: org.apache.hadoop.fs.s3a.S3A
+
+  sparkConf:
+    # 清除集群中 EMR Operator webhook 注入给 OSS Spark 的不兼容配置。
+    spark.driver.extraClassPath: ""
+    spark.executor.extraClassPath: ""
+    spark.executor.extraLibraryPath: ""
+    spark.driver.extraLibraryPath: ""
+    spark.sql.emr.internal.extensions: ""
+    spark.hadoop.mapreduce.output.fs.optimized.committer.enabled: "false"
+    spark.sql.parquet.fs.optimized.committer.optimization-enabled: "false"
+    spark.executor.defaultJavaOptions: "-XX:OnOutOfMemoryError='kill -9 %p'"
+    spark.driver.defaultJavaOptions: "-XX:OnOutOfMemoryError='kill -9 %p'"
+    spark.eventLog.enabled: "false"
+
+    spark.sql.adaptive.enabled: "true"
+    spark.sql.adaptive.coalescePartitions.enabled: "true"
+    spark.sql.shuffle.partitions: "100"
+    spark.default.parallelism: "100"
+    spark.streaming.stopGracefullyOnShutdown: "true"
+
+    spark.kubernetes.authenticate.executor.serviceAccountName: "emr-job-execution-sa"
+    spark.kubernetes.node.selector.workload-type: "spark-benchmark"
+    spark.kubernetes.node.selector.kubernetes.io/arch: "amd64"
+
+  volumes:
+    - name: empty-spark-conf
+      emptyDir: {}
+
+  driver:
+    cores: 2
+    coreLimit: "2000m"
+    memory: "4g"
+    serviceAccount: emr-job-execution-sa
+    env:
+      - name: KAFKA_BOOTSTRAP_SERVERS
+        valueFrom:
+          configMapKeyRef:
+            name: otel-opensearch-streaming-config
+            key: kafkaBootstrapServers
+      - name: OPENSEARCH_ENDPOINT
+        valueFrom:
+          configMapKeyRef:
+            name: otel-opensearch-streaming-config
+            key: opensearchEndpoint
+      - name: OPENSEARCH_STREAM_CHECKPOINT
+        valueFrom:
+          configMapKeyRef:
+            name: otel-opensearch-streaming-config
+            key: checkpointLocation
+      - name: AWS_REGION
+        value: "us-east-1"
+      - name: AWS_DEFAULT_REGION
+        value: "us-east-1"
+    labels:
+      version: "4.1.2"
+    volumeMounts:
+      - name: empty-spark-conf
+        mountPath: /usr/lib/spark/conf
+
+  executor:
+    cores: 4
+    coreLimit: "4000m"
+    memory: "8g"
+    instances: 5
+    env:
+      - name: AWS_REGION
+        value: "us-east-1"
+      - name: AWS_DEFAULT_REGION
+        value: "us-east-1"
+    labels:
+      version: "4.1.2"
+    volumeMounts:
+      - name: empty-spark-conf
+        mountPath: /usr/lib/spark/conf

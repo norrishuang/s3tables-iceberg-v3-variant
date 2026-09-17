@@ -1,5 +1,8 @@
-# 基于项目已验证成功的 S3 Tables 镜像，添加 Python 3.11 + Kafka + S3 Tables Catalog jar
+# 基于项目已验证成功的 S3 Tables 镜像，添加 Python 3.11、Kafka 和 OpenSearch Spark connector
 FROM 812046859005.dkr.ecr.us-east-1.amazonaws.com/oss-spark:4.1.2-iceberg1.11-s3t
+
+ARG OPENSEARCH_SPARK_VERSION=2.0.0
+ARG AWS_SDK_VERSION=2.31.59
 
 USER root
 
@@ -27,5 +30,17 @@ RUN curl -fSL -o /opt/spark/jars/spark-sql-kafka-0-10_2.13-4.1.2.jar \
       "https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/3.7.2/kafka-clients-3.7.2.jar" && \
     curl -fSL -o /opt/spark/jars/commons-pool2-2.12.0.jar \
       "https://repo1.maven.org/maven2/org/apache/commons/commons-pool2/2.12.0/commons-pool2-2.12.0.jar"
+
+# OpenSearch Hadoop 2.0：Spark 4.x / Scala 2.13 / OpenSearch 3.x 专用 artifact。
+# IAM SigV4 至少要求 AWS SDK v2 2.31.59。基础镜像中的旧 bundle 必须删除，
+# 否则同一 classpath 上出现两个 SDK 版本会导致 NoSuchMethodError。
+RUN rm -f /opt/spark/jars/bundle-*.jar && \
+    curl -fSL -o /opt/spark/jars/bundle-${AWS_SDK_VERSION}.jar \
+      "https://repo1.maven.org/maven2/software/amazon/awssdk/bundle/${AWS_SDK_VERSION}/bundle-${AWS_SDK_VERSION}.jar" && \
+    curl -fSL -o /opt/spark/jars/opensearch-spark-40_2.13-${OPENSEARCH_SPARK_VERSION}.jar \
+      "https://repo1.maven.org/maven2/org/opensearch/client/opensearch-spark-40_2.13/${OPENSEARCH_SPARK_VERSION}/opensearch-spark-40_2.13-${OPENSEARCH_SPARK_VERSION}.jar"
+
+# OpenSearch 作业随镜像发布，避免依赖 driver 启动时再从 S3 下载主脚本。
+COPY --chown=hadoop:hadoop otel_streaming_to_opensearch.py /opt/spark/work-dir/otel_streaming_to_opensearch.py
 
 USER hadoop

@@ -1,0 +1,32 @@
+{
+  "policy": {
+    "description": "Roll over agent trace log indexes after 1 day or when any primary shard reaches 40 GB",
+    "schema_version": 1,
+    "default_state": "hot",
+    "states": [
+      {
+        "name": "hot",
+        "actions": [
+          {
+            "retry": {
+              "count": 5,
+              "backoff": "exponential",
+              "delay": "1m"
+            },
+            "rollover": {
+              "min_index_age": "1d",
+              "min_primary_shard_size": "40gb"
+            }
+          }
+        ],
+        "transitions": []
+      }
+    ],
+    "ism_template": {
+      "index_patterns": [
+        "agent-trace-logs-*"
+      ],
+      "priority": 200
+    }
+  }
+}
