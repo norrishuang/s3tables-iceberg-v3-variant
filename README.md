@@ -256,3 +256,144 @@ kubectl logs -f -n emr-eks-spark \
 | `kafka_streaming_to_iceberg.py` | 旧版脚本（消费 agent.spans，自定义 JSON 格式） |
 | `otel_streaming_to_iceberg.py` | **新版脚本**（消费 agent.spans.otlp，OTel 标准格式） |
 | `kafka-streaming.yaml` | SparkApplication 配置（已切换到 OTel 版） |
+
+## Kafka Streaming → Amazon OpenSearch 3.7
+
+### 组件与兼容性
+
+新增的独立作业消费相同的 OTLP JSON Kafka 消息，并写入 Amazon OpenSearch Service；它不会替换现有 Iceberg 作业，两者可以使用不同的 consumer checkpoint 并行运行。
+
+| 组件 | 版本/说明 |
+|------|-----------|
+| Spark | 4.1.2 / Scala 2.13 |
+| OpenSearch Spark connector | `org.opensearch.client:opensearch-spark-40_2.13:2.0.0` |
+| OpenSearch | 3.x（包含 3.7） |
+| AWS SDK v2 | 2.31.59（connector IAM SigV4 的最低要求） |
+| 当前部署认证 | IAM SigV4；Spark driver/executor 通过 IRSA 获取凭证 |
+
+OpenSearch Hadoop 1.x connector 只支持 Spark 3.4 和 OpenSearch 1.x/2.x，不能用于本项目的 Spark 4.1.2。2.0.0 提供 Spark 4 专用 artifact，并正式支持 OpenSearch 3.x。
+
+### 新增文件
+
+| 文件 | 说明 |
+|------|------|
+| `kafka-streaming/otel_streaming_to_opensearch.py` | Kafka OTLP JSON → OpenSearch Structured Streaming 作业 |
+| `kafka-streaming/kafka-opensearch-streaming.yaml` | ConfigMap + SparkApplication 示例 |
+| `kafka-streaming/opensearch-index-template.json` | `agent-trace-logs-*` index template，3 primary/1 replica |
+| `kafka-streaming/opensearch-ism-policy.json` | 每 1 天或任一 primary shard 达到 40GB 时 rollover |
+
+Spark 始终写 alias `agent-trace-logs`。首个物理索引为 `agent-trace-logs-000001`，后续由 ISM 创建 `-000002`、`-000003`。同一个 rollover action 中的 `min_index_age` 和 `min_primary_shard_size` 是 OR 关系；ISM 按 job interval 检查，因此实际 rollover 时间和 shard 大小可能略超过阈值。
+
+写入使用 `traceId:spanId` 作为确定性 `_id`，并使用 `index` 操作。因此 Structured Streaming micro-batch 重试或 Kafka offset 重放只会覆盖同一个 span，不会创建重复文档。完整 attributes 和 resource attributes 序列化到不索引的 `attributesJson`、`resourceAttributesJson` 文本字段，避免任意属性造成 mapping explosion并兼容 OpenSearch 3.7 Derived Source；常用 OTel/GenAI 字段另外建立强类型字段用于查询；完整 events 保存在不索引的 `eventsJson` 中。
+
+> 该程序写入可查询的 span index，但不会生成 Data Prepper Trace Analytics 的 service-map index。如果需要 OpenSearch Dashboards 原生 Service Map，应使用 OTel Collector → Data Prepper/OSI trace pipeline。
+
+### 1. 构建镜像
+
+从 `kafka-streaming` 目录构建，以便 Dockerfile 将 Python 主程序复制进镜像：
+
+```bash
+export ECR_REGISTRY='<your-ecr-registry>'
+export IMAGE_TAG='4.1.2-iceberg1.11-kafka-opensearch2.0'
+
+docker build -t "${ECR_REGISTRY}/oss-spark:${IMAGE_TAG}" kafka-streaming/
+docker push "${ECR_REGISTRY}/oss-spark:${IMAGE_TAG}"
+```
+
+构建后镜像中应只有一个 AWS SDK v2 bundle；Dockerfile 会删除基础镜像的 2.29.52 bundle，并安装 2.31.59，避免 classpath 中两个 SDK 版本触发 `NoSuchMethodError`。
+
+### 2. 创建 ISM policy、index template 和首个写索引
+
+当前 domain resource policy 要求 IAM SigV4。基本认证请求会在到达 FGAC 之前被识别为 anonymous 并返回 403，因此使用当前 AWS 身份执行：
+
+```bash
+export AWS_REGION='us-east-1'
+export OPENSEARCH_ENDPOINT='https://your-domain-endpoint'
+
+# ISM policy
+awscurl --service es --region "${AWS_REGION}" \
+  -X PUT "${OPENSEARCH_ENDPOINT}/_plugins/_ism/policies/agent-trace-logs-rollover-policy" \
+  -H 'Content-Type: application/json' \
+  --data-binary @kafka-streaming/opensearch-ism-policy.json
+
+# Composable index template
+awscurl --service es --region "${AWS_REGION}" \
+  -X PUT "${OPENSEARCH_ENDPOINT}/_index_template/agent-trace-logs-template-v1" \
+  -H 'Content-Type: application/json' \
+  --data-binary @kafka-streaming/opensearch-index-template.json
+
+# 首个物理索引 + write alias
+awscurl --service es --region "${AWS_REGION}" \
+  -X PUT "${OPENSEARCH_ENDPOINT}/agent-trace-logs-000001" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "aliases": {
+      "agent-trace-logs": {
+        "is_write_index": true
+      }
+    }
+  }'
+```
+
+不要让 Spark 写 `agent-trace-logs-000001`；它必须写 alias `agent-trace-logs`，这样 ISM rollover 后无需重启作业。
+
+### 3. 配置认证
+
+当前 SparkApplication 使用 IAM SigV4。`emr-job-execution-sa` 对应的 IRSA role 必须同时满足：
+
+- domain resource policy 允许所需的 `es:ESHttpGet`、`es:ESHttpPost` 和 `es:ESHttpPut`；
+- 若启用了 FGAC，该 IAM role 已映射到具有目标 index metadata 读取和 Bulk 写入权限的 OpenSearch role；
+- driver 和 executor pod 都使用该 ServiceAccount，因为 connector 在 executor 内发送 Bulk 请求。
+
+不要在 YAML 或 Kubernetes ConfigMap 中保存 OpenSearch 用户名和密码。
+
+### 4. 部署
+
+编辑 `kafka-streaming/kafka-opensearch-streaming.yaml` 中的占位值：
+
+1. `spec.image`：上一步推送的完整镜像名；
+2. `kafkaBootstrapServers`：Kafka bootstrap servers；
+3. `opensearchEndpoint`：Amazon OpenSearch HTTPS endpoint；
+4. `checkpointLocation`：独立且持久化的 S3 checkpoint 路径。
+
+然后提交：
+
+```bash
+kubectl apply -f kafka-streaming/kafka-opensearch-streaming.yaml
+
+kubectl logs -f -n emr-eks-spark \
+  $(kubectl get pod -n emr-eks-spark \
+    -l spark-app-name=otel-spans-kafka-to-opensearch,spark-role=driver \
+    -o jsonpath='{.items[0].metadata.name}')
+```
+
+首次上线建议保留 `--starting-offsets latest`，避免未经容量评估就回灌全部历史数据。历史回灌时改为 `earliest`，并根据 domain 的 write rejection、CPU、JVM pressure 和 indexing latency 调小 `--max-offsets-per-trigger` 或 `--write-partitions`。
+
+### 5. 验证
+
+```bash
+# 查看物理索引与 alias
+awscurl --service es --region "${AWS_REGION}" \
+  "${OPENSEARCH_ENDPOINT}/_cat/indices/agent-trace-logs-*?v"
+
+awscurl --service es --region "${AWS_REGION}" \
+  "${OPENSEARCH_ENDPOINT}/_alias/agent-trace-logs?pretty"
+
+# 验证 ISM 已附加到首个索引
+awscurl --service es --region "${AWS_REGION}" \
+  "${OPENSEARCH_ENDPOINT}/_plugins/_ism/explain/agent-trace-logs-000001?pretty"
+
+# 抽样最近 span（通过 alias 查询所有 rollover indexes）
+awscurl --service es --region "${AWS_REGION}" \
+  -X POST "${OPENSEARCH_ENDPOINT}/agent-trace-logs/_search" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "size": 5,
+    "sort": [{"startTime": "desc"}],
+    "query": {"match_all": {}}
+  }'
+```
+
+官方参考：
+- [OpenSearch Hadoop connector 文档](https://docs.opensearch.org/latest/clients/hadoop/)
+- [OpenSearch Hadoop connector 2.0 发布说明](https://opensearch.org/blog/introducing-the-opensearch-hadoop-connector-2-0-spark-4-support-opensearch-serverless-and-more/)
